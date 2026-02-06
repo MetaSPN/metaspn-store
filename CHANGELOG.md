@@ -21,3 +21,12 @@ All notable changes to this project are documented in this file.
 - Added `ReplayCheckpoint` plus checkpoint persistence (`write_checkpoint` / `read_checkpoint`).
 - Added `iter_signals_from_checkpoint(...)` and `build_signal_checkpoint(...)` for worker resume.
 - Added M0 ingestion tests for JSONL-derived ingest, rerun with duplicates, and checkpoint resume.
+
+## [0.1.4] - 2026-02-06
+- Added M1 query helpers:
+  - `get_recent_signals_by_entity(...)`
+  - `get_recent_signals_by_source(...)`
+  - `iter_entity_candidate_signals(...)`
+  - `iter_stage_window_signals(...)`
+- Added deterministic ordering/filter tests for profile/scorer/router usage.
+- Added replay + checkpoint stage-window tests validating duplicate-safe rerun behavior.

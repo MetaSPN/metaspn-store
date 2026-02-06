@@ -59,6 +59,47 @@ if next_checkpoint is not None:
     store.write_checkpoint("ingestion_worker", next_checkpoint)
 ```
 
+## M1 Routing/Profile/Scoring Usage
+```python
+from datetime import datetime, timezone
+from metaspn_store import FileSystemStore
+
+store = FileSystemStore("/workspace")
+window_start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+window_end = datetime.now(timezone.utc)
+
+# Recent context for profile/scorer
+recent_profile = store.get_recent_signals_by_entity(entity_ref=entity_ref, limit=20)
+recent_route_source = store.get_recent_signals_by_source(source="route.worker", limit=50)
+
+# Resolver candidate streams
+resolved_candidates = store.iter_entity_candidate_signals(
+    start=window_start,
+    end=window_end,
+    resolved=True,
+)
+unresolved_candidates = store.iter_entity_candidate_signals(
+    start=window_start,
+    end=window_end,
+    resolved=False,
+)
+
+# Stage-window replay with checkpoint resume
+checkpoint = store.read_checkpoint("route_worker")
+batch = list(
+    store.iter_stage_window_signals(
+        stage="route",
+        start=window_start,
+        end=window_end,
+        checkpoint=checkpoint,
+        payload_types=["RouteInput"],
+    )
+)
+next_checkpoint = store.build_signal_checkpoint(batch)
+if next_checkpoint is not None:
+    store.write_checkpoint("route_worker", next_checkpoint)
+```
+
 ## Release
 ```bash
 python -m pip install -e ".[dev]"

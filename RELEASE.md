@@ -1,12 +1,16 @@
-# metaspn-store v0.1.3
+# metaspn-store v0.1.4
 
-M0 ingestion persistence update for `metaspn-store`.
+M1 replay/query primitives update for `metaspn-store`.
 
 ## Highlights
-- Added `write_signals(iterable)` and `write_emissions(iterable)` batch helpers.
-- Added `ReplayCheckpoint` and checkpoint persistence APIs (`write_checkpoint` / `read_checkpoint`).
-- Added `iter_signals_from_checkpoint(...)` for worker resume from partial progress.
-- Added `build_signal_checkpoint(...)` for deterministic replay cursor advancement.
+- Added recent context helpers for profiler/scorer/router workers:
+  - `get_recent_signals_by_entity(...)`
+  - `get_recent_signals_by_source(...)`
+- Added candidate stream helper:
+  - `iter_entity_candidate_signals(...)` with resolved/unresolved filtering
+- Added stage-window replay helper:
+  - `iter_stage_window_signals(...)` with checkpoint-aware deterministic replay
+- Preserved idempotent append behavior and duplicate-safe replay semantics.
 
 ## Included APIs
 - `write_signal`
@@ -16,6 +20,10 @@ M0 ingestion persistence update for `metaspn-store`.
 - `write_snapshot`
 - `iter_signals(start, end, entity_ref=None, sources=None)`
 - `iter_signals_from_checkpoint(end, checkpoint=None, start=None, entity_ref=None, sources=None)`
+- `get_recent_signals_by_entity(entity_ref, limit, start=None, end=None, sources=None)`
+- `get_recent_signals_by_source(source, limit, start=None, end=None, entity_ref=None)`
+- `iter_entity_candidate_signals(start, end, resolved=None, sources=None)`
+- `iter_stage_window_signals(stage, start, end, checkpoint=None, entity_ref=None, sources=None, payload_types=None)`
 - `iter_emissions(start, end, entity_ref=None, emission_types=None)`
 - `build_signal_checkpoint(processed_signals)`
 - `write_checkpoint(name, checkpoint)`
@@ -34,7 +42,7 @@ workspace/
 Each JSONL line contains one serialized envelope record.
 
 ## Quality and Validation
-- Test suite passes (`12 passed`).
+- Test suite passes (`15 passed`).
 - Coverage includes:
   - round-trip write/read
   - replay ordering
@@ -45,6 +53,8 @@ Each JSONL line contains one serialized envelope record.
   - initial ingest from JSONL-derived envelopes
   - replay rerun under duplicate attempts
   - checkpoint-based replay resume after partial processing
+  - recent query deterministic ordering and filter correctness
+  - stage-window checkpoint replay for routing runs
 
 ## Notes
 - Runtime dependencies are stdlib + `metaspn-schemas`.

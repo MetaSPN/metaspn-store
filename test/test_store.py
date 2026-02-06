@@ -374,3 +374,76 @@ def test_replay_from_checkpoint_after_partial_processing(tmp_path: Path) -> None
         )
     )
     assert [signal.signal_id for signal in resumed] == ["s-c3", "s-c4"]
+
+
+def test_recent_queries_last_n_by_entity_and_source_are_deterministic(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    ent_a = EntityRef(ref_type="entity_id", value="ent-a")
+    ent_b = EntityRef(ref_type="entity_id", value="ent-b")
+    signals = [
+        SignalEnvelope("s-rq1", _ts(5, 10, 0), "profile.worker", "Synthetic", {}, entity_refs=(ent_a,)),
+        SignalEnvelope("s-rq2", _ts(5, 10, 1), "profile.worker", "Synthetic", {}, entity_refs=(ent_a,)),
+        SignalEnvelope("s-rq3", _ts(5, 10, 2), "score.worker", "Synthetic", {}, entity_refs=(ent_a,)),
+        SignalEnvelope("s-rq4", _ts(5, 10, 3), "profile.worker", "Synthetic", {}, entity_refs=(ent_b,)),
+    ]
+    store.write_signals(signals)
+
+    recent_entity = store.get_recent_signals_by_entity(entity_ref=ent_a, limit=2)
+    assert [signal.signal_id for signal in recent_entity] == ["s-rq3", "s-rq2"]
+
+    recent_source = store.get_recent_signals_by_source(source="profile.worker", limit=3)
+    assert [signal.signal_id for signal in recent_source] == ["s-rq4", "s-rq2", "s-rq1"]
+
+
+def test_entity_candidate_stream_filters_resolved_and_unresolved(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    ent = EntityRef(ref_type="entity_id", value="ent-x")
+    store.write_signals(
+        [
+            SignalEnvelope("s-cand1", _ts(5, 10, 0), "resolver.input", "SocialPostSeen", {}, entity_refs=()),
+            SignalEnvelope("s-cand2", _ts(5, 10, 1), "resolver.worker", "EntityResolved", {}, entity_refs=()),
+            SignalEnvelope("s-cand3", _ts(5, 10, 2), "resolver.worker", "Synthetic", {}, entity_refs=(ent,)),
+        ]
+    )
+
+    unresolved = list(store.iter_entity_candidate_signals(start=_ts(5, 0, 0), end=_ts(5, 23, 59), resolved=False))
+    resolved = list(store.iter_entity_candidate_signals(start=_ts(5, 0, 0), end=_ts(5, 23, 59), resolved=True))
+
+    assert [signal.signal_id for signal in unresolved] == ["s-cand1"]
+    assert [signal.signal_id for signal in resolved] == ["s-cand2", "s-cand3"]
+
+
+def test_stage_window_replay_with_checkpoint_is_duplicate_safe(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope("s-sw1", _ts(5, 10, 0), "route.worker", "RouteInput", {}),
+            SignalEnvelope("s-sw2", _ts(5, 10, 0), "route.worker", "RouteInput", {}),
+            SignalEnvelope("s-sw3", _ts(5, 10, 1), "route.worker", "RouteInput", {}),
+            SignalEnvelope("s-sw4", _ts(5, 10, 2), "score.worker", "RouteInput", {}),
+        ]
+    )
+    # duplicate attempt should stay idempotent
+    store.write_signal(SignalEnvelope("s-sw2", _ts(5, 11, 0), "route.worker", "RouteInput", {}))
+
+    first_pass = list(
+        store.iter_stage_window_signals(
+            stage="route",
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            payload_types=["RouteInput"],
+        )
+    )
+    assert [signal.signal_id for signal in first_pass] == ["s-sw1", "s-sw2", "s-sw3"]
+
+    checkpoint = store.build_signal_checkpoint(first_pass[:2])
+    resumed = list(
+        store.iter_stage_window_signals(
+            stage="route",
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            checkpoint=checkpoint,
+            payload_types=["RouteInput"],
+        )
+    )
+    assert [signal.signal_id for signal in resumed] == ["s-sw3"]

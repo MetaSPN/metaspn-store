@@ -9,6 +9,7 @@ from typing import Any, Iterable, Iterator, Literal
 from metaspn_schemas import EmissionEnvelope, EntityRef, SignalEnvelope
 
 DuplicatePolicy = Literal["ignore", "return_existing", "raise"]
+RESOLVED_ENTITY_PAYLOAD_TYPES = frozenset({"EntityResolved", "EntityMerged", "EntityAliasAdded"})
 
 
 class DuplicateEventError(ValueError):
@@ -278,6 +279,111 @@ class FileSystemStore:
         ):
             signal_ts = _ensure_utc(signal.timestamp)
             if checkpoint_ts is not None and signal_ts == checkpoint_ts and signal.signal_id in seen_at_checkpoint:
+                continue
+            yield signal
+
+    def get_recent_signals_by_entity(
+        self,
+        *,
+        entity_ref: EntityRef,
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        sources: list[str] | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return last N signals for an entity in deterministic reverse chronological order."""
+        if limit <= 0:
+            return []
+        end_utc = _ensure_utc(end or datetime.now(timezone.utc))
+        start_utc = _ensure_utc(start or datetime(1970, 1, 1, tzinfo=timezone.utc))
+        signals = list(
+            self.iter_signals(
+                start=start_utc,
+                end=end_utc,
+                entity_ref=entity_ref,
+                sources=sources,
+            )
+        )
+        signals.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id), reverse=True)
+        return signals[:limit]
+
+    def get_recent_signals_by_source(
+        self,
+        *,
+        source: str,
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        entity_ref: EntityRef | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return last N signals for a source in deterministic reverse chronological order."""
+        if limit <= 0:
+            return []
+        end_utc = _ensure_utc(end or datetime.now(timezone.utc))
+        start_utc = _ensure_utc(start or datetime(1970, 1, 1, tzinfo=timezone.utc))
+        signals = list(
+            self.iter_signals(
+                start=start_utc,
+                end=end_utc,
+                entity_ref=entity_ref,
+                sources=[source],
+            )
+        )
+        signals.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id), reverse=True)
+        return signals[:limit]
+
+    def iter_entity_candidate_signals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        resolved: bool | None = None,
+        sources: list[str] | None = None,
+    ) -> Iterator[SignalEnvelope]:
+        """
+        Stream candidate resolver signals.
+
+        - resolved=True: envelopes with entity refs or resolver payload types.
+        - resolved=False: envelopes without entity refs and non-resolver payload types.
+        - resolved=None: all envelopes in the time range.
+        """
+        for signal in self.iter_signals(start=start, end=end, sources=sources):
+            is_resolved = bool(signal.entity_refs) or signal.payload_type in RESOLVED_ENTITY_PAYLOAD_TYPES
+            if resolved is None or is_resolved is resolved:
+                yield signal
+
+    def iter_stage_window_signals(
+        self,
+        *,
+        stage: str,
+        start: datetime,
+        end: datetime,
+        checkpoint: ReplayCheckpoint | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+    ) -> Iterator[SignalEnvelope]:
+        """
+        Replay a stage window for chained workers.
+
+        Signals are read from checkpoint-aware replay, then filtered by:
+        - explicit `sources`, if provided
+        - source prefix `<stage>.` when `sources` is not provided
+        - optional payload type allow-list
+        """
+        source_set = set(sources) if sources else None
+        payload_type_set = set(payload_types) if payload_types else None
+        stage_prefix = f"{stage}."
+        for signal in self.iter_signals_from_checkpoint(
+            start=start,
+            end=end,
+            checkpoint=checkpoint,
+            entity_ref=entity_ref,
+            sources=sources,
+        ):
+            if source_set is None and not (signal.source == stage or signal.source.startswith(stage_prefix)):
+                continue
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
                 continue
             yield signal
 
