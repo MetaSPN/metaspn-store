@@ -61,3 +61,13 @@ All notable changes to this project are documented in this file.
   - `get_ready_candidates(...)`
   - `get_outcomes_for_window(...)`
 - Added fixture-style demo regression tests for deterministic shortlist rebuild and rerun-safe date artifacts.
+
+## [0.1.8] - 2026-02-06
+- Added token/promise query helpers:
+  - `get_token_signals(...)`
+  - `get_promise_signals(...)`
+  - `get_promise_outcomes_for_window(...)`
+- Added credibility snapshot utilities:
+  - `write_credibility_snapshot(...)`
+  - `read_credibility_snapshot(...)`
+- Added deterministic token/promise replay tests and rerun duplicate-safety coverage.

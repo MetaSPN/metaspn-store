@@ -223,6 +223,37 @@ store.write_daily_digest_snapshot(day=day_start, digest={"ready": [item.signal_i
 store.write_calibration_snapshot(day=day_start, report={"outcomes": [item.emission_id for item in outcomes]})
 ```
 
+## Token/Promise Usage
+```python
+from datetime import datetime, timezone
+from metaspn_store import FileSystemStore
+
+store = FileSystemStore("/workspace")
+start = datetime(2026, 2, 5, 0, 0, tzinfo=timezone.utc)
+end = datetime(2026, 2, 5, 23, 59, tzinfo=timezone.utc)
+
+token_rows = store.get_token_signals(
+    start=start,
+    end=end,
+    token_id="tok-123",
+    project_entity_id="proj-456",
+)
+promise_rows = store.get_promise_signals(
+    start=start,
+    end=end,
+    promise_id="promise-1",
+    status="READY",
+)
+promise_outcomes = store.get_promise_outcomes_for_window(
+    start=start,
+    end=end,
+    promise_id="promise-1",
+)
+
+store.write_credibility_snapshot(day=start, report={"health": 0.92})
+credibility = store.read_credibility_snapshot(start)
+```
+
 ## Release
 ```bash
 python -m pip install -e ".[dev]"

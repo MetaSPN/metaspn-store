@@ -851,3 +851,140 @@ def test_demo_outcomes_for_window_and_rerun_no_duplicate_artifacts(tmp_path: Pat
     assert path_cal_1 == path_cal_2
     assert sorted(path_digest_1.parent.glob("digest__2026-02-05*.json")) == [path_digest_1]
     assert sorted(path_cal_1.parent.glob("calibration__2026-02-05*.json")) == [path_cal_1]
+
+
+def test_token_and_project_query_helpers_are_deterministic(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-t1",
+                _ts(5, 8, 0),
+                "tokens.worker",
+                "TokenObserved",
+                {"token_id": "tok-1", "project_entity_id": "proj-1", "status": "OPEN"},
+            ),
+            SignalEnvelope(
+                "s-t2",
+                _ts(5, 8, 1),
+                "tokens.worker",
+                "TokenObserved",
+                {"token_id": "tok-2", "project_entity_id": "proj-1", "status": "OPEN"},
+            ),
+            SignalEnvelope(
+                "s-t3",
+                _ts(5, 8, 2),
+                "tokens.worker",
+                "TokenObserved",
+                {"token_id": "tok-1", "project_entity_id": "proj-1", "status": "CLOSED"},
+            ),
+        ]
+    )
+    tok_rows = store.get_token_signals(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        token_id="tok-1",
+        project_entity_id="proj-1",
+    )
+    assert [row.signal_id for row in tok_rows] == ["s-t1", "s-t3"]
+
+
+def test_promise_status_and_outcome_window_queries(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-p1",
+                _ts(5, 9, 0),
+                "promises.worker",
+                "PromiseStatusChanged",
+                {"promise_id": "pr-1", "status": "PENDING"},
+            ),
+            SignalEnvelope(
+                "s-p2",
+                _ts(5, 9, 1),
+                "promises.worker",
+                "PromiseStatusChanged",
+                {"promise_id": "pr-1", "status": "READY"},
+            ),
+            SignalEnvelope(
+                "s-p3",
+                _ts(5, 9, 2),
+                "promises.worker",
+                "PromiseStatusChanged",
+                {"promise_id": "pr-2", "status": "READY"},
+            ),
+        ]
+    )
+    store.write_emissions(
+        [
+            EmissionEnvelope(
+                "e-p1",
+                _ts(5, 10, 0),
+                "PromiseOutcome",
+                {"promise_id": "pr-1", "status": "SUCCESS"},
+                caused_by="s-p2",
+            ),
+            EmissionEnvelope(
+                "e-p2",
+                _ts(5, 10, 1),
+                "PromiseOutcome",
+                {"promise_id": "pr-2", "status": "FAILED"},
+                caused_by="s-p3",
+            ),
+        ]
+    )
+    ready = store.get_promise_signals(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        promise_id="pr-1",
+        status="READY",
+    )
+    outcomes = store.get_promise_outcomes_for_window(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        promise_id="pr-1",
+    )
+    assert [row.signal_id for row in ready] == ["s-p2"]
+    assert [row.emission_id for row in outcomes] == ["e-p1"]
+
+
+def test_credibility_snapshot_round_trip_and_rerun_idempotence(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    report = {"token_health": 0.91, "promises_closed": 7}
+    first = store.write_credibility_snapshot(day="2026-02-05", report=report)
+    second = store.write_credibility_snapshot(day="2026-02-05", report=report)
+    loaded = store.read_credibility_snapshot("2026-02-05")
+    assert first == second
+    assert loaded is not None
+    assert loaded["report"] == report
+    assert sorted(first.parent.glob("credibility__2026-02-05*.json")) == [first]
+
+
+def test_token_promise_rerun_duplicate_safe_reads(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signal(
+        SignalEnvelope(
+            "s-tr1",
+            _ts(5, 12, 0),
+            "tokens.worker",
+            "TokenObserved",
+            {"token_id": "tok-r1", "project_entity_id": "proj-r1"},
+        )
+    )
+    # duplicate write attempt
+    store.write_signal(
+        SignalEnvelope(
+            "s-tr1",
+            _ts(5, 12, 5),
+            "tokens.worker",
+            "TokenObserved",
+            {"token_id": "tok-r1", "project_entity_id": "proj-r1"},
+        )
+    )
+    rows = store.get_token_signals(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        token_id="tok-r1",
+    )
+    assert [row.signal_id for row in rows] == ["s-tr1"]

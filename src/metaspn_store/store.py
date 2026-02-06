@@ -71,6 +71,14 @@ def _parse_datetime(value: Any) -> datetime | None:
     return None
 
 
+def _payload_match(payload: Any, key: str, expected: Any) -> bool:
+    if expected is None:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    return payload.get(key) == expected
+
+
 def _iter_days(start_day: date, end_day: date) -> Iterator[date]:
     current = start_day
     while current <= end_day:
@@ -584,6 +592,88 @@ class FileSystemStore:
         outcomes.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id))
         return outcomes
 
+    def get_token_signals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        token_id: str | None = None,
+        project_entity_id: str | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return token-centric signals filtered by token/project identifiers."""
+        payload_type_set = set(payload_types) if payload_types else None
+        rows: list[SignalEnvelope] = []
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, "token_id", token_id):
+                continue
+            if not _payload_match(signal.payload, "project_entity_id", project_entity_id):
+                continue
+            rows.append(signal)
+        rows.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id))
+        if limit is not None and limit >= 0:
+            return rows[:limit]
+        return rows
+
+    def get_promise_signals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        promise_id: str | None = None,
+        status: str | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        limit: int | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return promise lifecycle signals filtered by promise_id/status."""
+        payload_type_set = set(payload_types) if payload_types else None
+        rows: list[SignalEnvelope] = []
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, "promise_id", promise_id):
+                continue
+            if not _payload_match(signal.payload, "status", status):
+                continue
+            rows.append(signal)
+        rows.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id))
+        if limit is not None and limit >= 0:
+            return rows[:limit]
+        return rows
+
+    def get_promise_outcomes_for_window(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        promise_id: str | None = None,
+        status: str | None = None,
+        entity_ref: EntityRef | None = None,
+        emission_types: list[str] | None = None,
+    ) -> list[EmissionEnvelope]:
+        """Return promise-related outcomes in deterministic order."""
+        rows: list[EmissionEnvelope] = []
+        for emission in self.iter_emissions(
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            emission_types=emission_types,
+        ):
+            if not _payload_match(emission.payload, "promise_id", promise_id):
+                continue
+            if not _payload_match(emission.payload, "status", status):
+                continue
+            rows.append(emission)
+        rows.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id))
+        return rows
+
     def get_latest_draft_signals(
         self,
         *,
@@ -827,6 +917,30 @@ class FileSystemStore:
         """Read calibration report snapshot for a specific day."""
         day_token = self._normalize_day(day)
         source = self.snapshots_dir / f"calibration__{day_token}.json"
+        if not source.exists():
+            return None
+        with source.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def write_credibility_snapshot(
+        self,
+        *,
+        day: date | datetime | str,
+        report: dict[str, Any],
+    ) -> Path:
+        """Persist deterministic credibility report snapshot."""
+        day_token = self._normalize_day(day)
+        destination = self.snapshots_dir / f"credibility__{day_token}.json"
+        payload = {"day": day_token, "report": report, "schema_version": "0.1"}
+        with destination.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        return destination
+
+    def read_credibility_snapshot(self, day: date | datetime | str) -> dict[str, Any] | None:
+        """Read credibility report snapshot for a specific day."""
+        day_token = self._normalize_day(day)
+        source = self.snapshots_dir / f"credibility__{day_token}.json"
         if not source.exists():
             return None
         with source.open("r", encoding="utf-8") as handle:
