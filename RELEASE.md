@@ -1,4 +1,4 @@
-# metaspn-store v0.1.1
+# metaspn-store v0.1.2
 
 Idempotency and replay-safety update for `metaspn-store`.
 

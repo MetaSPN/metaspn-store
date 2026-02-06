@@ -9,7 +9,7 @@ All notable changes to this project are documented in this file.
 - Streaming replay API with filters by time window, entity reference, and source/type.
 - Test coverage for round-trip IO, replay ordering, window filtering, and large-file streaming.
 
-## [0.1.1] - 2026-02-06
+## [0.1.2] - 2026-02-06
 - Added idempotent writes for `signal_id` and `emission_id`.
 - Added duplicate handling policy on writes: `return_existing` (default), `ignore`, `raise`.
 - Added `DuplicateEventError` for explicit duplicate failure mode.
