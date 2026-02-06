@@ -10,6 +10,11 @@ from metaspn_schemas import EmissionEnvelope, EntityRef, SignalEnvelope
 
 DuplicatePolicy = Literal["ignore", "return_existing", "raise"]
 RESOLVED_ENTITY_PAYLOAD_TYPES = frozenset({"EntityResolved", "EntityMerged", "EntityAliasAdded"})
+DEFAULT_PENDING_OUTCOME_PAYLOAD_TYPES = frozenset(
+    {"OutcomePending", "EvaluationRequested", "RecommendationAttempted"}
+)
+DEFAULT_SUCCESS_EMISSION_TYPES = frozenset({"OutcomeSuccess", "DraftApproved"})
+DEFAULT_FAILURE_EMISSION_TYPES = frozenset({"OutcomeFailure", "DraftRejected"})
 
 
 class DuplicateEventError(ValueError):
@@ -52,6 +57,18 @@ def _ensure_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return _ensure_utc(value)
+    if isinstance(value, str):
+        text = value[:-1] + "+00:00" if value.endswith("Z") else value
+        try:
+            return _ensure_utc(datetime.fromisoformat(text))
+        except ValueError:
+            return None
+    return None
 
 
 def _iter_days(start_day: date, end_day: date) -> Iterator[date]:
@@ -410,6 +427,45 @@ class FileSystemStore:
                 continue
             yield signal
 
+    def iter_learning_signals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        checkpoint: ReplayCheckpoint | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+    ) -> Iterator[SignalEnvelope]:
+        """Replay learning-loop signal records with optional checkpoint and filters."""
+        payload_type_set = set(payload_types) if payload_types else None
+        for signal in self.iter_signals_from_checkpoint(
+            start=start,
+            end=end,
+            checkpoint=checkpoint,
+            entity_ref=entity_ref,
+            sources=sources,
+        ):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            yield signal
+
+    def iter_learning_emissions(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        emission_types: list[str] | None = None,
+    ) -> Iterator[EmissionEnvelope]:
+        """Replay learning-loop emissions with deterministic duplicate-safe behavior."""
+        yield from self.iter_emissions(
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            emission_types=emission_types,
+        )
+
     def get_top_recommendation_candidates(
         self,
         *,
@@ -501,6 +557,156 @@ class FileSystemStore:
         emissions.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id), reverse=True)
         return emissions[:limit]
 
+    def get_unresolved_outcome_signals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        pending_payload_types: list[str] | None = None,
+        success_emission_types: list[str] | None = None,
+        failure_emission_types: list[str] | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return pending outcome signals that have no success/failure emission yet."""
+        pending_types = set(pending_payload_types) if pending_payload_types else set(DEFAULT_PENDING_OUTCOME_PAYLOAD_TYPES)
+        success_types = set(success_emission_types) if success_emission_types else set(DEFAULT_SUCCESS_EMISSION_TYPES)
+        failure_types = set(failure_emission_types) if failure_emission_types else set(DEFAULT_FAILURE_EMISSION_TYPES)
+        resolved_caused_by: set[str] = set()
+
+        for emission in self.iter_emissions(
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            emission_types=sorted(success_types | failure_types),
+        ):
+            resolved_caused_by.add(emission.caused_by)
+
+        unresolved: list[SignalEnvelope] = []
+        for signal in self.iter_signals(
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            sources=sources,
+        ):
+            if signal.payload_type not in pending_types:
+                continue
+            if signal.signal_id in resolved_caused_by:
+                continue
+            unresolved.append(signal)
+        unresolved.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id))
+        return unresolved
+
+    def get_expired_outcome_signals(
+        self,
+        *,
+        now: datetime,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        pending_payload_types: list[str] | None = None,
+        success_emission_types: list[str] | None = None,
+        failure_emission_types: list[str] | None = None,
+        expires_at_field: str = "expires_at",
+    ) -> list[SignalEnvelope]:
+        """Return unresolved outcome signals whose expiration timestamp is before `now`."""
+        now_utc = _ensure_utc(now)
+        unresolved = self.get_unresolved_outcome_signals(
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            sources=sources,
+            pending_payload_types=pending_payload_types,
+            success_emission_types=success_emission_types,
+            failure_emission_types=failure_emission_types,
+        )
+        expired: list[SignalEnvelope] = []
+        for signal in unresolved:
+            if not isinstance(signal.payload, dict):
+                continue
+            expires_at = _parse_datetime(signal.payload.get(expires_at_field))
+            if expires_at is None:
+                continue
+            if expires_at < now_utc:
+                expired.append(signal)
+        expired.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id))
+        return expired
+
+    def get_outcome_window_buckets(
+        self,
+        *,
+        now: datetime,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        pending_payload_types: list[str] | None = None,
+        success_emission_types: list[str] | None = None,
+        failure_emission_types: list[str] | None = None,
+        expires_at_field: str = "expires_at",
+    ) -> dict[str, list[SignalEnvelope] | list[EmissionEnvelope]]:
+        """
+        Build deterministic learning-window buckets for evaluator workers.
+
+        Buckets:
+        - `pending`: unresolved and non-expired outcome signals
+        - `expired`: unresolved and expired outcome signals
+        - `success`: outcome success emissions
+        - `failure`: outcome failure emissions
+        """
+        success_types = set(success_emission_types) if success_emission_types else set(DEFAULT_SUCCESS_EMISSION_TYPES)
+        failure_types = set(failure_emission_types) if failure_emission_types else set(DEFAULT_FAILURE_EMISSION_TYPES)
+
+        unresolved = self.get_unresolved_outcome_signals(
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            sources=sources,
+            pending_payload_types=pending_payload_types,
+            success_emission_types=list(success_types),
+            failure_emission_types=list(failure_types),
+        )
+        expired = self.get_expired_outcome_signals(
+            now=now,
+            start=start,
+            end=end,
+            entity_ref=entity_ref,
+            sources=sources,
+            pending_payload_types=pending_payload_types,
+            success_emission_types=list(success_types),
+            failure_emission_types=list(failure_types),
+            expires_at_field=expires_at_field,
+        )
+        expired_ids = {signal.signal_id for signal in expired}
+        pending = [signal for signal in unresolved if signal.signal_id not in expired_ids]
+
+        success = list(
+            self.iter_learning_emissions(
+                start=start,
+                end=end,
+                entity_ref=entity_ref,
+                emission_types=sorted(success_types),
+            )
+        )
+        failure = list(
+            self.iter_learning_emissions(
+                start=start,
+                end=end,
+                entity_ref=entity_ref,
+                emission_types=sorted(failure_types),
+            )
+        )
+        success.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id))
+        failure.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id))
+
+        return {
+            "pending": pending,
+            "expired": expired,
+            "success": success,
+            "failure": failure,
+        }
+
     def _normalize_day(self, day: date | datetime | str) -> str:
         if isinstance(day, str):
             return day
@@ -527,6 +733,30 @@ class FileSystemStore:
         """Read a previously written daily digest snapshot."""
         day_token = self._normalize_day(day)
         source = self.snapshots_dir / f"digest__{day_token}.json"
+        if not source.exists():
+            return None
+        with source.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def write_calibration_snapshot(
+        self,
+        *,
+        day: date | datetime | str,
+        report: dict[str, Any],
+    ) -> Path:
+        """Persist deterministic calibration report snapshot."""
+        day_token = self._normalize_day(day)
+        destination = self.snapshots_dir / f"calibration__{day_token}.json"
+        payload = {"day": day_token, "report": report, "schema_version": "0.1"}
+        with destination.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        return destination
+
+    def read_calibration_snapshot(self, day: date | datetime | str) -> dict[str, Any] | None:
+        """Read calibration report snapshot for a specific day."""
+        day_token = self._normalize_day(day)
+        source = self.snapshots_dir / f"calibration__{day_token}.json"
         if not source.exists():
             return None
         with source.open("r", encoding="utf-8") as handle:

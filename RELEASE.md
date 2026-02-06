@@ -1,18 +1,18 @@
-# metaspn-store v0.1.5
+# metaspn-store v0.1.6
 
-M2 recommendation read-model update for `metaspn-store`.
+M3 learning data persistence update for `metaspn-store`.
 
 ## Highlights
-- Added ranking-input query helper for recommendation runs:
-  - `get_top_recommendation_candidates(...)`
-- Added recommendation replay helper:
-  - `iter_recommendation_signals(...)` with checkpoint-aware deterministic replay
-- Added daily digest snapshot read/write utilities:
-  - `write_daily_digest_snapshot(...)`
-  - `read_daily_digest_snapshot(...)`
-- Added read helpers for draft and approval outcome views:
-  - `get_latest_draft_signals(...)`
-  - `get_latest_approval_outcomes(...)`
+- Added learning-loop replay helpers:
+  - `iter_learning_signals(...)`
+  - `iter_learning_emissions(...)`
+- Added outcome window query helpers for evaluator workers:
+  - `get_unresolved_outcome_signals(...)`
+  - `get_expired_outcome_signals(...)`
+  - `get_outcome_window_buckets(...)` (`pending` / `expired` / `success` / `failure`)
+- Added calibration snapshot persistence/retrieval:
+  - `write_calibration_snapshot(...)`
+  - `read_calibration_snapshot(...)`
 
 ## Included APIs
 - `write_signal`
@@ -32,6 +32,13 @@ M2 recommendation read-model update for `metaspn-store`.
 - `get_latest_approval_outcomes(limit, start, end, entity_ref=None, emission_types=None)`
 - `write_daily_digest_snapshot(day, digest)`
 - `read_daily_digest_snapshot(day)`
+- `iter_learning_signals(start, end, checkpoint=None, entity_ref=None, sources=None, payload_types=None)`
+- `iter_learning_emissions(start, end, entity_ref=None, emission_types=None)`
+- `get_unresolved_outcome_signals(start, end, entity_ref=None, sources=None, pending_payload_types=None, success_emission_types=None, failure_emission_types=None)`
+- `get_expired_outcome_signals(now, start, end, entity_ref=None, sources=None, pending_payload_types=None, success_emission_types=None, failure_emission_types=None, expires_at_field="expires_at")`
+- `get_outcome_window_buckets(now, start, end, entity_ref=None, sources=None, pending_payload_types=None, success_emission_types=None, failure_emission_types=None, expires_at_field="expires_at")`
+- `write_calibration_snapshot(day, report)`
+- `read_calibration_snapshot(day)`
 - `iter_emissions(start, end, entity_ref=None, emission_types=None)`
 - `build_signal_checkpoint(processed_signals)`
 - `write_checkpoint(name, checkpoint)`
@@ -45,29 +52,20 @@ workspace/
     emissions/YYYY-MM-DD.jsonl
     checkpoints/<name>.json
     snapshots/digest__YYYY-MM-DD.json
+    snapshots/calibration__YYYY-MM-DD.json
     snapshots/<name>__YYYY-MM-DDTHHMMSSZ.json
 ```
 
 Each JSONL line contains one serialized envelope record.
 
 ## Quality and Validation
-- Test suite passes (`19 passed`).
+- Test suite passes (`22 passed`).
 - Coverage includes:
-  - round-trip write/read
-  - replay ordering
-  - time window correctness + filters
-  - large-file streaming replay (10k+ scale)
-  - duplicate writes (same-day and cross-day retry scenarios)
-  - mixed duplicate/non-duplicate bulk write behavior
-  - initial ingest from JSONL-derived envelopes
-  - replay rerun under duplicate attempts
-  - checkpoint-based replay resume after partial processing
-  - recent query deterministic ordering and filter correctness
-  - stage-window checkpoint replay for routing runs
-  - deterministic recommendation ranking retrieval
-  - digest snapshot round-trip reproducibility
-  - latest draft/approval read model correctness
-  - recommendation replay checkpoint duplicate safety
+  - deterministic replay and checkpoint resume
+  - idempotent duplicate-safe writes/replay
+  - ranking/digest read models
+  - learning-window pending/expired/success/failure bucket evaluation
+  - calibration snapshot round-trip persistence
 
 ## Notes
 - Runtime dependencies are stdlib + `metaspn-schemas`.

@@ -587,3 +587,134 @@ def test_recommendation_replay_from_checkpoint_is_duplicate_safe(tmp_path: Path)
         )
     )
     assert [signal.signal_id for signal in resumed] == ["s-rp3"]
+
+
+def test_learning_replay_with_checkpoint_is_deterministic(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-l1",
+                _ts(5, 13, 0),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T14:00:00Z"},
+            ),
+            SignalEnvelope(
+                "s-l2",
+                _ts(5, 13, 0),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T15:00:00Z"},
+            ),
+            SignalEnvelope(
+                "s-l3",
+                _ts(5, 13, 1),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T16:00:00Z"},
+            ),
+        ]
+    )
+    store.write_signal(
+        SignalEnvelope(
+            "s-l2",
+            _ts(5, 14, 0),
+            "learning.worker",
+            "OutcomePending",
+            {"expires_at": "2026-02-05T17:00:00Z"},
+        )
+    )
+
+    first = list(
+        store.iter_learning_signals(
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            sources=["learning.worker"],
+            payload_types=["OutcomePending"],
+        )
+    )
+    checkpoint = store.build_signal_checkpoint(first[:2])
+    resumed = list(
+        store.iter_learning_signals(
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            checkpoint=checkpoint,
+            sources=["learning.worker"],
+            payload_types=["OutcomePending"],
+        )
+    )
+    assert [signal.signal_id for signal in first] == ["s-l1", "s-l2", "s-l3"]
+    assert [signal.signal_id for signal in resumed] == ["s-l3"]
+
+
+def test_outcome_window_buckets_pending_success_failure_expired(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-o1",
+                _ts(5, 10, 0),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T11:00:00Z"},
+            ),
+            SignalEnvelope(
+                "s-o2",
+                _ts(5, 10, 1),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T20:00:00Z"},
+            ),
+            SignalEnvelope(
+                "s-o3",
+                _ts(5, 10, 2),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T20:00:00Z"},
+            ),
+            SignalEnvelope(
+                "s-o4",
+                _ts(5, 10, 3),
+                "learning.worker",
+                "OutcomePending",
+                {"expires_at": "2026-02-05T20:00:00Z"},
+            ),
+        ]
+    )
+    store.write_emissions(
+        [
+            EmissionEnvelope("e-o1", _ts(5, 10, 20), "OutcomeSuccess", {"result": "ok"}, caused_by="s-o3"),
+            EmissionEnvelope("e-o2", _ts(5, 10, 25), "OutcomeFailure", {"result": "bad"}, caused_by="s-o4"),
+        ]
+    )
+
+    buckets = store.get_outcome_window_buckets(
+        now=_ts(5, 12, 0),
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        sources=["learning.worker"],
+        pending_payload_types=["OutcomePending"],
+        success_emission_types=["OutcomeSuccess"],
+        failure_emission_types=["OutcomeFailure"],
+    )
+    assert [signal.signal_id for signal in buckets["pending"]] == ["s-o2"]
+    assert [signal.signal_id for signal in buckets["expired"]] == ["s-o1"]
+    assert [emission.emission_id for emission in buckets["success"]] == ["e-o1"]
+    assert [emission.emission_id for emission in buckets["failure"]] == ["e-o2"]
+
+
+def test_calibration_snapshot_round_trip(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    report = {
+        "model": "draft_v2",
+        "accuracy": 0.82,
+        "window_days": 30,
+    }
+    path = store.write_calibration_snapshot(day="2026-02-05", report=report)
+    assert path.name == "calibration__2026-02-05.json"
+
+    loaded = store.read_calibration_snapshot("2026-02-05")
+    assert loaded is not None
+    assert loaded["day"] == "2026-02-05"
+    assert loaded["report"] == report

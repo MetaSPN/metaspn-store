@@ -156,6 +156,46 @@ if next_checkpoint is not None:
     store.write_checkpoint("recommend_worker", next_checkpoint)
 ```
 
+## M3 Learning/Calibration Usage
+```python
+from datetime import datetime, timezone
+from metaspn_store import FileSystemStore
+
+store = FileSystemStore("/workspace")
+window_start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+window_end = datetime.now(timezone.utc)
+
+# Learning replay with checkpoint support
+checkpoint = store.read_checkpoint("learning_worker")
+learning_events = list(
+    store.iter_learning_signals(
+        start=window_start,
+        end=window_end,
+        checkpoint=checkpoint,
+        sources=["learning.worker"],
+        payload_types=["OutcomePending"],
+    )
+)
+next_checkpoint = store.build_signal_checkpoint(learning_events)
+if next_checkpoint is not None:
+    store.write_checkpoint("learning_worker", next_checkpoint)
+
+# Window buckets for evaluator workers
+buckets = store.get_outcome_window_buckets(
+    now=window_end,
+    start=window_start,
+    end=window_end,
+    sources=["learning.worker"],
+    pending_payload_types=["OutcomePending"],
+    success_emission_types=["OutcomeSuccess"],
+    failure_emission_types=["OutcomeFailure"],
+)
+
+# Calibration snapshots
+store.write_calibration_snapshot(day=window_end, report={"bucket_count": len(buckets["pending"])})
+calibration_report = store.read_calibration_snapshot(window_end)
+```
+
 ## Release
 ```bash
 python -m pip install -e ".[dev]"

@@ -41,3 +41,16 @@ All notable changes to this project are documented in this file.
   - `write_daily_digest_snapshot(...)`
   - `read_daily_digest_snapshot(...)`
 - Added deterministic ranking, digest snapshot round-trip, and recommendation replay checkpoint tests.
+
+## [0.1.6] - 2026-02-06
+- Added M3 learning-loop replay helpers:
+  - `iter_learning_signals(...)`
+  - `iter_learning_emissions(...)`
+- Added outcome window query helpers:
+  - `get_unresolved_outcome_signals(...)`
+  - `get_expired_outcome_signals(...)`
+  - `get_outcome_window_buckets(...)`
+- Added calibration snapshot utilities:
+  - `write_calibration_snapshot(...)`
+  - `read_calibration_snapshot(...)`
+- Added deterministic tests for incremental learning replay, bucketed outcome evaluation, and calibration snapshot round-trips.
