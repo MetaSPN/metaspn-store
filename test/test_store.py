@@ -447,3 +447,143 @@ def test_stage_window_replay_with_checkpoint_is_duplicate_safe(tmp_path: Path) -
         )
     )
     assert [signal.signal_id for signal in resumed] == ["s-sw3"]
+
+
+def test_recommendation_candidate_ranking_is_deterministic(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    ent_a = EntityRef(ref_type="entity_id", value="ent-a")
+    ent_b = EntityRef(ref_type="entity_id", value="ent-b")
+    ent_c = EntityRef(ref_type="entity_id", value="ent-c")
+
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-rec1",
+                _ts(5, 9, 0),
+                "score.worker",
+                "RecommendationCandidate",
+                {"score": 0.7},
+                entity_refs=(ent_a,),
+            ),
+            SignalEnvelope(
+                "s-rec2",
+                _ts(5, 9, 1),
+                "score.worker",
+                "RecommendationCandidate",
+                {"score": 0.9},
+                entity_refs=(ent_b,),
+            ),
+            SignalEnvelope(
+                "s-rec3",
+                _ts(5, 9, 2),
+                "score.worker",
+                "RecommendationCandidate",
+                {"score": 0.85},
+                entity_refs=(ent_c,),
+            ),
+            # Duplicate entity with lower score should not displace top score for ent-b.
+            SignalEnvelope(
+                "s-rec4",
+                _ts(5, 9, 3),
+                "score.worker",
+                "RecommendationCandidate",
+                {"score": 0.1},
+                entity_refs=(ent_b,),
+            ),
+        ]
+    )
+
+    ranked = store.get_top_recommendation_candidates(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        limit=3,
+        sources=["score.worker"],
+        payload_types=["RecommendationCandidate"],
+    )
+    assert [signal.signal_id for signal in ranked] == ["s-rec2", "s-rec3", "s-rec1"]
+
+
+def test_daily_digest_snapshot_round_trip(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    digest = {
+        "top_candidates": ["ent-a", "ent-b"],
+        "drafts_ready": 2,
+        "approvals_pending": 1,
+    }
+    path = store.write_daily_digest_snapshot(day="2026-02-05", digest=digest)
+    assert path.name == "digest__2026-02-05.json"
+
+    loaded = store.read_daily_digest_snapshot("2026-02-05")
+    assert loaded is not None
+    assert loaded["day"] == "2026-02-05"
+    assert loaded["digest"] == digest
+
+
+def test_latest_drafts_and_approval_outcomes_reads(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    ent = EntityRef(ref_type="entity_id", value="ent-draft")
+    store.write_signals(
+        [
+            SignalEnvelope("s-d1", _ts(5, 10, 0), "draft.worker", "DraftGenerated", {}, entity_refs=(ent,)),
+            SignalEnvelope("s-d2", _ts(5, 10, 1), "draft.worker", "DraftGenerated", {}, entity_refs=(ent,)),
+            SignalEnvelope("s-d3", _ts(5, 10, 2), "draft.worker", "DraftEdited", {}, entity_refs=(ent,)),
+        ]
+    )
+    store.write_emissions(
+        [
+            EmissionEnvelope("e-a1", _ts(5, 11, 0), "DraftApproved", {"ok": True}, caused_by="s-d1", entity_refs=(ent,)),
+            EmissionEnvelope("e-a2", _ts(5, 11, 2), "DraftRejected", {"ok": False}, caused_by="s-d2", entity_refs=(ent,)),
+        ]
+    )
+
+    drafts = store.get_latest_draft_signals(
+        limit=2,
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        entity_ref=ent,
+        sources=["draft.worker"],
+    )
+    approvals = store.get_latest_approval_outcomes(
+        limit=2,
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        entity_ref=ent,
+        emission_types=["DraftApproved", "DraftRejected"],
+    )
+
+    assert [signal.signal_id for signal in drafts] == ["s-d3", "s-d2"]
+    assert [emission.emission_id for emission in approvals] == ["e-a2", "e-a1"]
+
+
+def test_recommendation_replay_from_checkpoint_is_duplicate_safe(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope("s-rp1", _ts(5, 12, 0), "recommend.worker", "RecommendationCandidate", {"score": 0.3}),
+            SignalEnvelope("s-rp2", _ts(5, 12, 0), "recommend.worker", "RecommendationCandidate", {"score": 0.4}),
+            SignalEnvelope("s-rp3", _ts(5, 12, 1), "recommend.worker", "RecommendationCandidate", {"score": 0.5}),
+        ]
+    )
+    store.write_signal(
+        SignalEnvelope("s-rp2", _ts(5, 12, 5), "recommend.worker", "RecommendationCandidate", {"score": 0.9})
+    )
+
+    first_batch = list(
+        store.iter_recommendation_signals(
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            sources=["recommend.worker"],
+            payload_types=["RecommendationCandidate"],
+        )
+    )
+    checkpoint = store.build_signal_checkpoint(first_batch[:2])
+    resumed = list(
+        store.iter_recommendation_signals(
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            checkpoint=checkpoint,
+            sources=["recommend.worker"],
+            payload_types=["RecommendationCandidate"],
+        )
+    )
+    assert [signal.signal_id for signal in resumed] == ["s-rp3"]

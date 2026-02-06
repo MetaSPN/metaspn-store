@@ -387,6 +387,151 @@ class FileSystemStore:
                 continue
             yield signal
 
+    def iter_recommendation_signals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        checkpoint: ReplayCheckpoint | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+    ) -> Iterator[SignalEnvelope]:
+        """Replay recommendation-scoped signals with optional checkpoint and filters."""
+        payload_type_set = set(payload_types) if payload_types else None
+        for signal in self.iter_signals_from_checkpoint(
+            start=start,
+            end=end,
+            checkpoint=checkpoint,
+            entity_ref=entity_ref,
+            sources=sources,
+        ):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            yield signal
+
+    def get_top_recommendation_candidates(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        score_field: str = "score",
+        unique_by_entity: bool = True,
+    ) -> list[SignalEnvelope]:
+        """Return top ranked recommendation candidates for a window."""
+        if limit <= 0:
+            return []
+
+        payload_type_set = set(payload_types) if payload_types else None
+        candidates: list[tuple[float, datetime, str, SignalEnvelope]] = []
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not isinstance(signal.payload, dict):
+                continue
+            raw_score = signal.payload.get(score_field, 0.0)
+            if not isinstance(raw_score, (int, float)):
+                continue
+            candidates.append((float(raw_score), _ensure_utc(signal.timestamp), signal.signal_id, signal))
+
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        if not unique_by_entity:
+            return [item[3] for item in candidates[:limit]]
+
+        selected: list[SignalEnvelope] = []
+        seen_entity_keys: set[str] = set()
+        for _, _, _, signal in candidates:
+            if signal.entity_refs:
+                primary_ref = signal.entity_refs[0]
+                entity_key = f"{primary_ref.ref_type}:{primary_ref.platform}:{primary_ref.value}"
+            else:
+                entity_key = f"signal:{signal.signal_id}"
+            if entity_key in seen_entity_keys:
+                continue
+            seen_entity_keys.add(entity_key)
+            selected.append(signal)
+            if len(selected) >= limit:
+                break
+        return selected
+
+    def get_latest_draft_signals(
+        self,
+        *,
+        limit: int,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return latest draft-related signals in deterministic descending order."""
+        if limit <= 0:
+            return []
+        payload_type_set = set(payload_types) if payload_types else None
+        signals = list(self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources))
+        if payload_type_set is not None:
+            signals = [signal for signal in signals if signal.payload_type in payload_type_set]
+        signals.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id), reverse=True)
+        return signals[:limit]
+
+    def get_latest_approval_outcomes(
+        self,
+        *,
+        limit: int,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        emission_types: list[str] | None = None,
+    ) -> list[EmissionEnvelope]:
+        """Return latest approval-related emissions in deterministic descending order."""
+        if limit <= 0:
+            return []
+        emissions = list(
+            self.iter_emissions(
+                start=start,
+                end=end,
+                entity_ref=entity_ref,
+                emission_types=emission_types,
+            )
+        )
+        emissions.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id), reverse=True)
+        return emissions[:limit]
+
+    def _normalize_day(self, day: date | datetime | str) -> str:
+        if isinstance(day, str):
+            return day
+        if isinstance(day, datetime):
+            return _ensure_utc(day).date().isoformat()
+        return day.isoformat()
+
+    def write_daily_digest_snapshot(
+        self,
+        *,
+        day: date | datetime | str,
+        digest: dict[str, Any],
+    ) -> Path:
+        """Persist a deterministic daily digest snapshot for recommendation/draft workers."""
+        day_token = self._normalize_day(day)
+        destination = self.snapshots_dir / f"digest__{day_token}.json"
+        payload = {"day": day_token, "digest": digest, "schema_version": "0.1"}
+        with destination.open("w", encoding="utf-8") as handle:
+            json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        return destination
+
+    def read_daily_digest_snapshot(self, day: date | datetime | str) -> dict[str, Any] | None:
+        """Read a previously written daily digest snapshot."""
+        day_token = self._normalize_day(day)
+        source = self.snapshots_dir / f"digest__{day_token}.json"
+        if not source.exists():
+            return None
+        with source.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
+
     def build_signal_checkpoint(self, processed_signals: Iterable[SignalEnvelope]) -> ReplayCheckpoint | None:
         """Build a resume checkpoint from an already-processed, ordered signal stream."""
         last_ts: datetime | None = None

@@ -100,6 +100,62 @@ if next_checkpoint is not None:
     store.write_checkpoint("route_worker", next_checkpoint)
 ```
 
+## M2 Recommendation/Digest Usage
+```python
+from datetime import datetime, timezone
+from metaspn_store import FileSystemStore
+
+store = FileSystemStore("/workspace")
+window_start = datetime(2026, 2, 1, tzinfo=timezone.utc)
+window_end = datetime.now(timezone.utc)
+
+# Ranking candidates for recommendations
+top_candidates = store.get_top_recommendation_candidates(
+    start=window_start,
+    end=window_end,
+    limit=25,
+    sources=["score.worker"],
+    payload_types=["RecommendationCandidate"],
+    score_field="score",
+)
+
+# Daily digest snapshots
+store.write_daily_digest_snapshot(
+    day=window_end,
+    digest={"top_candidates": [item.signal_id for item in top_candidates]},
+)
+digest = store.read_daily_digest_snapshot(window_end)
+
+# Draft/approval read models
+latest_drafts = store.get_latest_draft_signals(
+    limit=20,
+    start=window_start,
+    end=window_end,
+    sources=["draft.worker"],
+)
+latest_approval_outcomes = store.get_latest_approval_outcomes(
+    limit=20,
+    start=window_start,
+    end=window_end,
+    emission_types=["DraftApproved", "DraftRejected"],
+)
+
+# Replay recommendation events with checkpoint safety
+checkpoint = store.read_checkpoint("recommend_worker")
+events = list(
+    store.iter_recommendation_signals(
+        start=window_start,
+        end=window_end,
+        checkpoint=checkpoint,
+        sources=["recommend.worker"],
+        payload_types=["RecommendationCandidate"],
+    )
+)
+next_checkpoint = store.build_signal_checkpoint(events)
+if next_checkpoint is not None:
+    store.write_checkpoint("recommend_worker", next_checkpoint)
+```
+
 ## Release
 ```bash
 python -m pip install -e ".[dev]"

@@ -30,3 +30,14 @@ All notable changes to this project are documented in this file.
   - `iter_stage_window_signals(...)`
 - Added deterministic ordering/filter tests for profile/scorer/router usage.
 - Added replay + checkpoint stage-window tests validating duplicate-safe rerun behavior.
+
+## [0.1.5] - 2026-02-06
+- Added M2 recommendation read-model APIs:
+  - `iter_recommendation_signals(...)`
+  - `get_top_recommendation_candidates(...)`
+  - `get_latest_draft_signals(...)`
+  - `get_latest_approval_outcomes(...)`
+- Added daily digest snapshot utilities:
+  - `write_daily_digest_snapshot(...)`
+  - `read_daily_digest_snapshot(...)`
+- Added deterministic ranking, digest snapshot round-trip, and recommendation replay checkpoint tests.
