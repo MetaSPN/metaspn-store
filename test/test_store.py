@@ -718,3 +718,136 @@ def test_calibration_snapshot_round_trip(tmp_path: Path) -> None:
     assert loaded is not None
     assert loaded["day"] == "2026-02-05"
     assert loaded["report"] == report
+
+
+def test_demo_last_posts_by_entity_and_ready_candidates(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    ent = EntityRef(ref_type="entity_id", value="ent-demo")
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-dp1",
+                _ts(5, 9, 0),
+                "ingest.social",
+                "SocialPostSeen",
+                {"text": "a"},
+                entity_refs=(ent,),
+            ),
+            SignalEnvelope(
+                "s-dp2",
+                _ts(5, 9, 1),
+                "score.worker",
+                "RecommendationCandidate",
+                {"status": "READY", "score": 0.8},
+                entity_refs=(ent,),
+            ),
+            SignalEnvelope(
+                "s-dp3",
+                _ts(5, 9, 2),
+                "score.worker",
+                "RecommendationCandidate",
+                {"status": "HOLD", "score": 0.9},
+                entity_refs=(ent,),
+            ),
+            SignalEnvelope(
+                "s-dp4",
+                _ts(5, 9, 3),
+                "ingest.social",
+                "SocialPostSeen",
+                {"text": "b"},
+                entity_refs=(ent,),
+            ),
+            SignalEnvelope(
+                "s-dp5",
+                _ts(5, 9, 4),
+                "score.worker",
+                "RecommendationCandidate",
+                {"status": "READY", "score": 0.85},
+                entity_refs=(ent,),
+            ),
+        ]
+    )
+
+    posts = store.get_last_posts_by_entity(entity_ref=ent, limit=2)
+    ready = store.get_ready_candidates(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        sources=["score.worker"],
+        payload_types=["RecommendationCandidate"],
+    )
+    assert [signal.signal_id for signal in posts] == ["s-dp4", "s-dp1"]
+    assert [signal.signal_id for signal in ready] == ["s-dp5", "s-dp2"]
+
+
+def test_demo_outcomes_for_window_and_rerun_no_duplicate_artifacts(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    ent = EntityRef(ref_type="entity_id", value="ent-outcome")
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-do1",
+                _ts(5, 10, 0),
+                "score.worker",
+                "RecommendationCandidate",
+                {"status": "READY", "score": 0.7},
+                entity_refs=(ent,),
+            ),
+            SignalEnvelope(
+                "s-do2",
+                _ts(5, 10, 1),
+                "score.worker",
+                "RecommendationCandidate",
+                {"status": "READY", "score": 0.6},
+                entity_refs=(ent,),
+            ),
+        ]
+    )
+    store.write_emissions(
+        [
+            EmissionEnvelope("e-do1", _ts(5, 11, 0), "OutcomeSuccess", {"ok": True}, caused_by="s-do1", entity_refs=(ent,)),
+            EmissionEnvelope("e-do2", _ts(5, 11, 1), "OutcomeFailure", {"ok": False}, caused_by="s-do2", entity_refs=(ent,)),
+        ]
+    )
+
+    outcomes_1 = store.get_outcomes_for_window(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        entity_ref=ent,
+        emission_types=["OutcomeSuccess", "OutcomeFailure"],
+    )
+    ready_1 = store.get_ready_candidates(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        entity_ref=ent,
+        sources=["score.worker"],
+        payload_types=["RecommendationCandidate"],
+    )
+
+    digest_payload = {"ready_ids": [signal.signal_id for signal in ready_1]}
+    calibration_payload = {"outcomes": [emission.emission_id for emission in outcomes_1]}
+    path_digest_1 = store.write_daily_digest_snapshot(day="2026-02-05", digest=digest_payload)
+    path_cal_1 = store.write_calibration_snapshot(day="2026-02-05", report=calibration_payload)
+
+    # Simulate rerun of same day.
+    outcomes_2 = store.get_outcomes_for_window(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        entity_ref=ent,
+        emission_types=["OutcomeSuccess", "OutcomeFailure"],
+    )
+    ready_2 = store.get_ready_candidates(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        entity_ref=ent,
+        sources=["score.worker"],
+        payload_types=["RecommendationCandidate"],
+    )
+    path_digest_2 = store.write_daily_digest_snapshot(day="2026-02-05", digest=digest_payload)
+    path_cal_2 = store.write_calibration_snapshot(day="2026-02-05", report=calibration_payload)
+
+    assert [emission.emission_id for emission in outcomes_1] == [emission.emission_id for emission in outcomes_2]
+    assert [signal.signal_id for signal in ready_1] == [signal.signal_id for signal in ready_2]
+    assert path_digest_1 == path_digest_2
+    assert path_cal_1 == path_cal_2
+    assert sorted(path_digest_1.parent.glob("digest__2026-02-05*.json")) == [path_digest_1]
+    assert sorted(path_cal_1.parent.glob("calibration__2026-02-05*.json")) == [path_cal_1]

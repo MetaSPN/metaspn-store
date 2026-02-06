@@ -1,18 +1,14 @@
-# metaspn-store v0.1.6
+# metaspn-store v0.1.7
 
-M3 learning data persistence update for `metaspn-store`.
+Demo storage/replay bridge update for `metaspn-store`.
 
 ## Highlights
-- Added learning-loop replay helpers:
-  - `iter_learning_signals(...)`
-  - `iter_learning_emissions(...)`
-- Added outcome window query helpers for evaluator workers:
-  - `get_unresolved_outcome_signals(...)`
-  - `get_expired_outcome_signals(...)`
-  - `get_outcome_window_buckets(...)` (`pending` / `expired` / `success` / `failure`)
-- Added calibration snapshot persistence/retrieval:
-  - `write_calibration_snapshot(...)`
-  - `read_calibration_snapshot(...)`
+- Added demo-focused query helpers:
+  - `get_last_posts_by_entity(...)`
+  - `get_ready_candidates(...)`
+  - `get_outcomes_for_window(...)`
+- Validated rerun safety for same-date demo artifacts (digest + calibration snapshots overwrite deterministically).
+- Preserved deterministic replay and idempotent write behavior across demo flow operations.
 
 ## Included APIs
 - `write_signal`
@@ -24,6 +20,9 @@ M3 learning data persistence update for `metaspn-store`.
 - `iter_signals_from_checkpoint(end, checkpoint=None, start=None, entity_ref=None, sources=None)`
 - `get_recent_signals_by_entity(entity_ref, limit, start=None, end=None, sources=None)`
 - `get_recent_signals_by_source(source, limit, start=None, end=None, entity_ref=None)`
+- `get_last_posts_by_entity(entity_ref, limit, start=None, end=None, sources=None, payload_types=None)`
+- `get_ready_candidates(start, end, limit=None, entity_ref=None, sources=None, ready_field="status", ready_value="READY", payload_types=None)`
+- `get_outcomes_for_window(start, end, entity_ref=None, emission_types=None)`
 - `iter_entity_candidate_signals(start, end, resolved=None, sources=None)`
 - `iter_stage_window_signals(stage, start, end, checkpoint=None, entity_ref=None, sources=None, payload_types=None)`
 - `iter_recommendation_signals(start, end, checkpoint=None, entity_ref=None, sources=None, payload_types=None)`
@@ -59,13 +58,14 @@ workspace/
 Each JSONL line contains one serialized envelope record.
 
 ## Quality and Validation
-- Test suite passes (`22 passed`).
+- Test suite passes (`24 passed`).
 - Coverage includes:
   - deterministic replay and checkpoint resume
   - idempotent duplicate-safe writes/replay
   - ranking/digest read models
   - learning-window pending/expired/success/failure bucket evaluation
   - calibration snapshot round-trip persistence
+  - demo shortlist fixture-like rerun flow validation
 
 ## Notes
 - Runtime dependencies are stdlib + `metaspn-schemas`.

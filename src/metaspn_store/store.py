@@ -324,6 +324,28 @@ class FileSystemStore:
         signals.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id), reverse=True)
         return signals[:limit]
 
+    def get_last_posts_by_entity(
+        self,
+        *,
+        entity_ref: EntityRef,
+        limit: int,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return last N social-post-like signals for an entity."""
+        post_types = set(payload_types) if payload_types else {"SocialPostSeen"}
+        recent = self.get_recent_signals_by_entity(
+            entity_ref=entity_ref,
+            limit=max(limit * 4, limit),
+            start=start,
+            end=end,
+            sources=sources,
+        )
+        posts = [signal for signal in recent if signal.payload_type in post_types]
+        return posts[:limit]
+
     def get_recent_signals_by_source(
         self,
         *,
@@ -513,6 +535,54 @@ class FileSystemStore:
             if len(selected) >= limit:
                 break
         return selected
+
+    def get_ready_candidates(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        limit: int | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        ready_field: str = "status",
+        ready_value: str = "READY",
+        payload_types: list[str] | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return READY candidates for shortlist generation in deterministic order."""
+        payload_type_set = set(payload_types) if payload_types else None
+        candidates: list[SignalEnvelope] = []
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not isinstance(signal.payload, dict):
+                continue
+            if signal.payload.get(ready_field) != ready_value:
+                continue
+            candidates.append(signal)
+        candidates.sort(key=lambda signal: (_ensure_utc(signal.timestamp), signal.signal_id), reverse=True)
+        if limit is not None and limit >= 0:
+            return candidates[:limit]
+        return candidates
+
+    def get_outcomes_for_window(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        entity_ref: EntityRef | None = None,
+        emission_types: list[str] | None = None,
+    ) -> list[EmissionEnvelope]:
+        """Return deterministic outcomes for a date window."""
+        outcomes = list(
+            self.iter_emissions(
+                start=start,
+                end=end,
+                entity_ref=entity_ref,
+                emission_types=emission_types,
+            )
+        )
+        outcomes.sort(key=lambda emission: (_ensure_utc(emission.timestamp), emission.emission_id))
+        return outcomes
 
     def get_latest_draft_signals(
         self,

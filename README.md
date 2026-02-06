@@ -196,6 +196,33 @@ store.write_calibration_snapshot(day=window_end, report={"bucket_count": len(buc
 calibration_report = store.read_calibration_snapshot(window_end)
 ```
 
+## Demo Bridge Usage
+```python
+from datetime import datetime, timezone
+from metaspn_store import FileSystemStore
+
+store = FileSystemStore("/workspace")
+day_start = datetime(2026, 2, 5, 0, 0, tzinfo=timezone.utc)
+day_end = datetime(2026, 2, 5, 23, 59, tzinfo=timezone.utc)
+
+posts = store.get_last_posts_by_entity(entity_ref=entity_ref, limit=10)
+ready_candidates = store.get_ready_candidates(
+    start=day_start,
+    end=day_end,
+    sources=["score.worker"],
+    payload_types=["RecommendationCandidate"],
+)
+outcomes = store.get_outcomes_for_window(
+    start=day_start,
+    end=day_end,
+    emission_types=["OutcomeSuccess", "OutcomeFailure"],
+)
+
+# Date-scoped artifacts remain deterministic on rerun (same file path rewritten)
+store.write_daily_digest_snapshot(day=day_start, digest={"ready": [item.signal_id for item in ready_candidates]})
+store.write_calibration_snapshot(day=day_start, report={"outcomes": [item.emission_id for item in outcomes]})
+```
+
 ## Release
 ```bash
 python -m pip install -e ".[dev]"

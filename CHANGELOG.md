@@ -54,3 +54,10 @@ All notable changes to this project are documented in this file.
   - `write_calibration_snapshot(...)`
   - `read_calibration_snapshot(...)`
 - Added deterministic tests for incremental learning replay, bucketed outcome evaluation, and calibration snapshot round-trips.
+
+## [0.1.7] - 2026-02-06
+- Added demo bridge query helpers:
+  - `get_last_posts_by_entity(...)`
+  - `get_ready_candidates(...)`
+  - `get_outcomes_for_window(...)`
+- Added fixture-style demo regression tests for deterministic shortlist rebuild and rerun-safe date artifacts.
