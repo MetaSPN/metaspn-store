@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "metaspn-store"
+version = "0.1.0"
+description = "Minimal append-only durability layer and replay API for MetaSPN signals and emissions"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "MetaSPN" }]
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["metaspn", "event-store", "replay", "append-only", "jsonl"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+]
+dependencies = ["metaspn-schemas>=0.1.0"]
+
+[project.urls]
+Homepage = "https://github.com/MetaSPN/metaspn-store"
+Repository = "https://github.com/MetaSPN/metaspn-store"
+Issues = "https://github.com/MetaSPN/metaspn-store/issues"
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "build>=1.2.0", "twine>=5.0.0", "wheel>=0.43.0"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
