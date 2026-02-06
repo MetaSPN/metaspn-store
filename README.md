@@ -6,6 +6,8 @@
 - Filesystem JSONL backend (partitioned by UTC date)
 - Append-only writes for signals and emissions
 - Idempotent event writes keyed by `signal_id` / `emission_id`
+- Batched signal/emission write helpers
+- Replay checkpoint utilities for worker resume
 - Snapshot writes for deterministic state rebuild checkpoints
 - Streaming replay by time window, entity reference, and source
 
@@ -17,6 +19,8 @@ workspace/
       2026-02-05.jsonl
     emissions/
       2026-02-05.jsonl
+    checkpoints/
+      ingestion_worker.json
     snapshots/
       system_state__2026-02-05T120000Z.json
 ```
@@ -27,13 +31,33 @@ workspace/
   - `return_existing` (default): do not append; return the path of the first existing record.
   - `ignore`: alias for `return_existing`.
   - `raise`: raise `DuplicateEventError`.
-- Duplicate detection scans existing JSONL partitions for matching IDs.
+- Duplicate detection uses a lazily-hydrated in-memory ID index sourced from existing JSONL partitions.
 - Replay iterators suppress duplicate IDs and yield the first-seen record deterministically.
 
-## Performance Note
-- Duplicate detection in v0.1 is file-scan based for local-first simplicity.
-- For large histories with high write throughput, this is a correctness-first tradeoff.
-- A manifest/hash index strategy is planned for a future version.
+## M0 Ingestion Usage
+```python
+from datetime import datetime, timezone
+from metaspn_store import FileSystemStore
+
+store = FileSystemStore("/workspace")
+
+# Batch ingest parsed envelopes
+store.write_signals(signal_batch)
+store.write_emissions(emission_batch)
+
+# Resume-friendly replay for workers
+checkpoint = store.read_checkpoint("ingestion_worker")
+to_process = store.iter_signals_from_checkpoint(
+    start=datetime(2026, 2, 1, tzinfo=timezone.utc),
+    end=datetime.now(timezone.utc),
+    checkpoint=checkpoint,
+)
+
+processed = process_batch(to_process)
+next_checkpoint = store.build_signal_checkpoint(processed)
+if next_checkpoint is not None:
+    store.write_checkpoint("ingestion_worker", next_checkpoint)
+```
 
 ## Release
 ```bash

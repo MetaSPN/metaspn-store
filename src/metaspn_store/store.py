@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterable, Iterator, Literal
 
 from metaspn_schemas import EmissionEnvelope, EntityRef, SignalEnvelope
 
@@ -12,6 +13,38 @@ DuplicatePolicy = Literal["ignore", "return_existing", "raise"]
 
 class DuplicateEventError(ValueError):
     """Raised when a duplicate event ID is written with on_duplicate='raise'."""
+
+
+@dataclass(frozen=True)
+class ReplayCheckpoint:
+    """Replay checkpoint keyed by timestamp and IDs seen at that timestamp."""
+
+    last_timestamp: datetime
+    seen_ids_at_timestamp: tuple[str, ...] = field(default_factory=tuple)
+    schema_version: str = "0.1"
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "last_timestamp", _ensure_utc(self.last_timestamp))
+        unique_seen = tuple(dict.fromkeys(self.seen_ids_at_timestamp))
+        object.__setattr__(self, "seen_ids_at_timestamp", unique_seen)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "last_timestamp": self.last_timestamp.isoformat().replace("+00:00", "Z"),
+            "seen_ids_at_timestamp": list(self.seen_ids_at_timestamp),
+            "schema_version": self.schema_version,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> ReplayCheckpoint:
+        timestamp_text = data["last_timestamp"]
+        if isinstance(timestamp_text, str) and timestamp_text.endswith("Z"):
+            timestamp_text = timestamp_text[:-1] + "+00:00"
+        return cls(
+            last_timestamp=datetime.fromisoformat(timestamp_text),
+            seen_ids_at_timestamp=tuple(data.get("seen_ids_at_timestamp", [])),
+            schema_version=str(data.get("schema_version", "0.1")),
+        )
 
 
 def _ensure_utc(value: datetime) -> datetime:
@@ -36,6 +69,7 @@ class FileSystemStore:
         self.signals_dir = self.store_root / "signals"
         self.emissions_dir = self.store_root / "emissions"
         self.snapshots_dir = self.store_root / "snapshots"
+        self.checkpoints_dir = self.store_root / "checkpoints"
         self._signal_index: dict[str, Path] | None = None
         self._emission_index: dict[str, Path] | None = None
         self._ensure_dirs()
@@ -44,6 +78,7 @@ class FileSystemStore:
         self.signals_dir.mkdir(parents=True, exist_ok=True)
         self.emissions_dir.mkdir(parents=True, exist_ok=True)
         self.snapshots_dir.mkdir(parents=True, exist_ok=True)
+        self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
 
     def _build_index(self, base_dir: Path, id_field: str) -> dict[str, Path]:
         index: dict[str, Path] = {}
@@ -115,6 +150,15 @@ class FileSystemStore:
         signal_index[signal.signal_id] = destination
         return destination
 
+    def write_signals(
+        self,
+        signals: Iterable[SignalEnvelope],
+        *,
+        on_duplicate: DuplicatePolicy = "return_existing",
+    ) -> list[Path]:
+        """Write a batch of signals using the same duplicate policy."""
+        return [self.write_signal(signal, on_duplicate=on_duplicate) for signal in signals]
+
     def write_emission(
         self,
         emission: EmissionEnvelope,
@@ -145,6 +189,15 @@ class FileSystemStore:
             handle.write("\n")
         emission_index[emission.emission_id] = destination
         return destination
+
+    def write_emissions(
+        self,
+        emissions: Iterable[EmissionEnvelope],
+        *,
+        on_duplicate: DuplicatePolicy = "return_existing",
+    ) -> list[Path]:
+        """Write a batch of emissions using the same duplicate policy."""
+        return [self.write_emission(emission, on_duplicate=on_duplicate) for emission in emissions]
 
     def write_snapshot(
         self,
@@ -197,6 +250,69 @@ class FileSystemStore:
                         continue
                     seen_signal_ids.add(signal.signal_id)
                     yield signal
+
+    def iter_signals_from_checkpoint(
+        self,
+        *,
+        end: datetime,
+        checkpoint: ReplayCheckpoint | None = None,
+        start: datetime | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+    ) -> Iterator[SignalEnvelope]:
+        """Replay signals from start/checkpoint without re-yielding already-processed records."""
+        effective_start = _ensure_utc(start) if start is not None else datetime(1970, 1, 1, tzinfo=timezone.utc)
+        seen_at_checkpoint: set[str] = set()
+        checkpoint_ts: datetime | None = None
+        if checkpoint is not None:
+            checkpoint_ts = _ensure_utc(checkpoint.last_timestamp)
+            if checkpoint_ts > effective_start:
+                effective_start = checkpoint_ts
+            seen_at_checkpoint = set(checkpoint.seen_ids_at_timestamp)
+
+        for signal in self.iter_signals(
+            start=effective_start,
+            end=end,
+            entity_ref=entity_ref,
+            sources=sources,
+        ):
+            signal_ts = _ensure_utc(signal.timestamp)
+            if checkpoint_ts is not None and signal_ts == checkpoint_ts and signal.signal_id in seen_at_checkpoint:
+                continue
+            yield signal
+
+    def build_signal_checkpoint(self, processed_signals: Iterable[SignalEnvelope]) -> ReplayCheckpoint | None:
+        """Build a resume checkpoint from an already-processed, ordered signal stream."""
+        last_ts: datetime | None = None
+        ids_at_last_ts: list[str] = []
+        for signal in processed_signals:
+            signal_ts = _ensure_utc(signal.timestamp)
+            if last_ts is None or signal_ts > last_ts:
+                last_ts = signal_ts
+                ids_at_last_ts = [signal.signal_id]
+                continue
+            if signal_ts < last_ts:
+                raise ValueError("processed_signals must be in non-decreasing timestamp order")
+            if signal.signal_id not in ids_at_last_ts:
+                ids_at_last_ts.append(signal.signal_id)
+        if last_ts is None:
+            return None
+        return ReplayCheckpoint(last_timestamp=last_ts, seen_ids_at_timestamp=tuple(ids_at_last_ts))
+
+    def write_checkpoint(self, name: str, checkpoint: ReplayCheckpoint) -> Path:
+        destination = self.checkpoints_dir / f"{name}.json"
+        with destination.open("w", encoding="utf-8") as handle:
+            json.dump(checkpoint.to_dict(), handle, sort_keys=True, separators=(",", ":"))
+            handle.write("\n")
+        return destination
+
+    def read_checkpoint(self, name: str) -> ReplayCheckpoint | None:
+        source = self.checkpoints_dir / f"{name}.json"
+        if not source.exists():
+            return None
+        with source.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        return ReplayCheckpoint.from_dict(data)
 
     def iter_emissions(
         self,

@@ -15,3 +15,9 @@ All notable changes to this project are documented in this file.
 - Added `DuplicateEventError` for explicit duplicate failure mode.
 - Replay now suppresses duplicate IDs deterministically (first-seen record wins).
 - Added regression tests for same-day/cross-day duplicates and mixed duplicate bulk writes.
+
+## [0.1.3] - 2026-02-06
+- Added `write_signals(iterable)` and `write_emissions(iterable)` batch helpers.
+- Added `ReplayCheckpoint` plus checkpoint persistence (`write_checkpoint` / `read_checkpoint`).
+- Added `iter_signals_from_checkpoint(...)` and `build_signal_checkpoint(...)` for worker resume.
+- Added M0 ingestion tests for JSONL-derived ingest, rerun with duplicates, and checkpoint resume.

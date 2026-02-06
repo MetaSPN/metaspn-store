@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from metaspn_schemas import EmissionEnvelope, EntityRef, SignalEnvelope
 import pytest
 
-from metaspn_store import DuplicateEventError, FileSystemStore
+from metaspn_store import DuplicateEventError, FileSystemStore, ReplayCheckpoint
 
 
 def _ts(day: int, hour: int = 0, minute: int = 0) -> datetime:
@@ -240,3 +241,136 @@ def test_on_duplicate_raise_policy(tmp_path: Path) -> None:
     store.write_signal(signal)
     with pytest.raises(DuplicateEventError):
         store.write_signal(signal, on_duplicate="raise")
+
+
+def test_initial_ingest_from_jsonl_derived_envelopes(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    raw_lines = [
+        json.dumps(
+            {
+                "signal_id": "s-j1",
+                "timestamp": "2026-02-05T10:00:00Z",
+                "source": "ingestor.jsonl",
+                "payload_type": "Synthetic",
+                "payload": {"k": 1},
+                "schema_version": "0.1",
+            }
+        ),
+        json.dumps(
+            {
+                "signal_id": "s-j2",
+                "timestamp": "2026-02-05T10:01:00Z",
+                "source": "ingestor.jsonl",
+                "payload_type": "Synthetic",
+                "payload": {"k": 2},
+                "schema_version": "0.1",
+            }
+        ),
+    ]
+    signals = [SignalEnvelope.from_dict(json.loads(line)) for line in raw_lines]
+    paths = store.write_signals(signals)
+    assert len(paths) == 2
+
+    replayed = list(store.iter_signals(_ts(5, 0, 0), _ts(5, 23, 59), sources=["ingestor.jsonl"]))
+    assert [signal.signal_id for signal in replayed] == ["s-j1", "s-j2"]
+
+
+def test_rerun_with_duplicates_stays_deterministic(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    batch_1 = [
+        SignalEnvelope(
+            signal_id="s-r1",
+            timestamp=_ts(5, 10, 0),
+            source="ingestor.m0",
+            payload_type="Synthetic",
+            payload={"attempt": 1},
+        ),
+        SignalEnvelope(
+            signal_id="s-r2",
+            timestamp=_ts(5, 10, 1),
+            source="ingestor.m0",
+            payload_type="Synthetic",
+            payload={"attempt": 1},
+        ),
+    ]
+    batch_2 = [
+        SignalEnvelope(
+            signal_id="s-r1",
+            timestamp=_ts(6, 10, 0),
+            source="ingestor.m0",
+            payload_type="Synthetic",
+            payload={"attempt": 2},
+        ),
+        SignalEnvelope(
+            signal_id="s-r3",
+            timestamp=_ts(6, 10, 2),
+            source="ingestor.m0",
+            payload_type="Synthetic",
+            payload={"attempt": 1},
+        ),
+    ]
+
+    store.write_signals(batch_1)
+    store.write_signals(batch_2)
+
+    replayed = list(store.iter_signals(_ts(5, 0, 0), _ts(6, 23, 59), sources=["ingestor.m0"]))
+    assert [signal.signal_id for signal in replayed] == ["s-r1", "s-r2", "s-r3"]
+
+
+def test_replay_from_checkpoint_after_partial_processing(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    signals = [
+        SignalEnvelope(
+            signal_id="s-c1",
+            timestamp=_ts(5, 10, 0),
+            source="ingestor.cursor",
+            payload_type="Synthetic",
+            payload={},
+        ),
+        SignalEnvelope(
+            signal_id="s-c2",
+            timestamp=_ts(5, 10, 0),
+            source="ingestor.cursor",
+            payload_type="Synthetic",
+            payload={},
+        ),
+        SignalEnvelope(
+            signal_id="s-c3",
+            timestamp=_ts(5, 10, 1),
+            source="ingestor.cursor",
+            payload_type="Synthetic",
+            payload={},
+        ),
+        SignalEnvelope(
+            signal_id="s-c4",
+            timestamp=_ts(5, 10, 2),
+            source="ingestor.cursor",
+            payload_type="Synthetic",
+            payload={},
+        ),
+    ]
+    store.write_signals(signals)
+
+    first_pass = list(
+        store.iter_signals_from_checkpoint(
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            checkpoint=None,
+            sources=["ingestor.cursor"],
+        )
+    )
+    processed_chunk = first_pass[:2]
+    checkpoint = store.build_signal_checkpoint(processed_chunk)
+    assert isinstance(checkpoint, ReplayCheckpoint)
+    store.write_checkpoint("ingestion_worker", checkpoint)
+
+    loaded_checkpoint = store.read_checkpoint("ingestion_worker")
+    resumed = list(
+        store.iter_signals_from_checkpoint(
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            checkpoint=loaded_checkpoint,
+            sources=["ingestor.cursor"],
+        )
+    )
+    assert [signal.signal_id for signal in resumed] == ["s-c3", "s-c4"]
