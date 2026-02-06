@@ -4,8 +4,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from metaspn_schemas import EmissionEnvelope, EntityRef, SignalEnvelope
+import pytest
 
-from metaspn_store import FileSystemStore
+from metaspn_store import DuplicateEventError, FileSystemStore
 
 
 def _ts(day: int, hour: int = 0, minute: int = 0) -> datetime:
@@ -143,3 +144,99 @@ def test_snapshot_write_creates_expected_file(tmp_path: Path) -> None:
     )
     assert path.name == "system_state__2026-02-05T120000Z.json"
     assert path.exists()
+
+
+def test_duplicate_signal_write_returns_existing_and_replay_has_single_record(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    first = SignalEnvelope(
+        signal_id="s-dup",
+        timestamp=_ts(5, 10, 0),
+        source="ingestor.a",
+        payload_type="Synthetic",
+        payload={"attempt": 1},
+    )
+    second = SignalEnvelope(
+        signal_id="s-dup",
+        timestamp=_ts(6, 10, 0),
+        source="ingestor.a",
+        payload_type="Synthetic",
+        payload={"attempt": 2},
+    )
+
+    first_path = store.write_signal(first)
+    second_path = store.write_signal(second)
+
+    assert second_path == first_path
+    replayed = list(store.iter_signals(_ts(5, 0, 0), _ts(6, 23, 59)))
+    assert [item.signal_id for item in replayed] == ["s-dup"]
+    assert replayed[0].payload == {"attempt": 1}
+
+
+def test_duplicate_emission_write_returns_existing_and_replay_has_single_record(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    first = EmissionEnvelope(
+        emission_id="e-dup",
+        timestamp=_ts(5, 10, 0),
+        emission_type="SyntheticOutcome",
+        payload={"attempt": 1},
+        caused_by="s-1",
+    )
+    second = EmissionEnvelope(
+        emission_id="e-dup",
+        timestamp=_ts(6, 10, 0),
+        emission_type="SyntheticOutcome",
+        payload={"attempt": 2},
+        caused_by="s-2",
+    )
+
+    first_path = store.write_emission(first)
+    second_path = store.write_emission(second)
+
+    assert second_path == first_path
+    replayed = list(store.iter_emissions(_ts(5, 0, 0), _ts(6, 23, 59)))
+    assert [item.emission_id for item in replayed] == ["e-dup"]
+    assert replayed[0].payload == {"attempt": 1}
+
+
+def test_mixed_bulk_duplicate_and_unique_writes(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+
+    for idx in range(20):
+        store.write_signal(
+            SignalEnvelope(
+                signal_id=f"s-{idx}",
+                timestamp=_ts(5, 0, 0) + timedelta(minutes=idx),
+                source="ingestor.bulk",
+                payload_type="Bulk",
+                payload={"idx": idx},
+            )
+        )
+
+    for idx in [0, 1, 2, 2, 3, 10, 10, 19]:
+        store.write_signal(
+            SignalEnvelope(
+                signal_id=f"s-{idx}",
+                timestamp=_ts(6, 0, 0) + timedelta(minutes=idx),
+                source="ingestor.bulk",
+                payload_type="Bulk",
+                payload={"idx": idx, "retry": True},
+            )
+        )
+
+    replayed = list(store.iter_signals(_ts(5, 0, 0), _ts(6, 23, 59)))
+    assert len(replayed) == 20
+    assert len({item.signal_id for item in replayed}) == 20
+
+
+def test_on_duplicate_raise_policy(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    signal = SignalEnvelope(
+        signal_id="s-raise",
+        timestamp=_ts(5, 12, 0),
+        source="ingestor.x",
+        payload_type="Synthetic",
+        payload={},
+    )
+    store.write_signal(signal)
+    with pytest.raises(DuplicateEventError):
+        store.write_signal(signal, on_duplicate="raise")

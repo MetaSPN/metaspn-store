@@ -1,3 +1,3 @@
-from metaspn_store.store import FileSystemStore
+from metaspn_store.store import DuplicateEventError, FileSystemStore
 
-__all__ = ["FileSystemStore"]
+__all__ = ["DuplicateEventError", "FileSystemStore"]

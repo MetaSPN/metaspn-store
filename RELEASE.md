@@ -1,12 +1,12 @@
-# metaspn-store v0.1.0
+# metaspn-store v0.1.1
 
-Initial release of `metaspn-store`, the MetaSPN durability layer for append-only signals/emissions and deterministic replay.
+Idempotency and replay-safety update for `metaspn-store`.
 
 ## Highlights
-- Filesystem JSONL backend partitioned by UTC day.
-- Append-only writes for `SignalEnvelope` and `EmissionEnvelope`.
-- Snapshot persistence for point-in-time state capture.
-- Streaming replay APIs by time window with optional filters.
+- Added idempotent writes for `SignalEnvelope` and `EmissionEnvelope` keyed by stable IDs.
+- Added duplicate policy contract: `return_existing` (default), `ignore`, `raise`.
+- Added `DuplicateEventError` when duplicate policy is `raise`.
+- Replay iterators now suppress duplicate IDs deterministically (first-seen record wins).
 
 ## Included APIs
 - `write_signal`
@@ -27,13 +27,16 @@ workspace/
 Each JSONL line contains one serialized envelope record.
 
 ## Quality and Validation
-- Test suite passes (`5 passed`).
+- Test suite passes (`9 passed`).
 - Coverage includes:
   - round-trip write/read
   - replay ordering
   - time window correctness + filters
   - large-file streaming replay (10k+ scale)
+  - duplicate writes (same-day and cross-day retry scenarios)
+  - mixed duplicate/non-duplicate bulk write behavior
 
 ## Notes
 - Runtime dependencies are stdlib + `metaspn-schemas`.
 - Raw event records remain append-only to preserve reproducibility.
+- v0.1 duplicate detection uses a local in-memory ID index hydrated from JSONL partitions.
