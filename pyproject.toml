@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "metaspn-store"
-version = "0.1.8"
+version = "0.1.9"
 description = "Minimal append-only durability layer and replay API for MetaSPN signals and emissions"
 readme = "README.md"
 requires-python = ">=3.10"

@@ -79,6 +79,24 @@ def _payload_match(payload: Any, key: str, expected: Any) -> bool:
     return payload.get(key) == expected
 
 
+def _payload_number(payload: Any, key: str, default: float = 0.0) -> float:
+    if not isinstance(payload, dict):
+        return default
+    value = payload.get(key, default)
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    return default
+
+
+def _payload_text(payload: Any, key: str) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
 def _iter_days(start_day: date, end_day: date) -> Iterator[date]:
     current = start_day
     while current <= end_day:
@@ -866,6 +884,466 @@ class FileSystemStore:
             "success": success,
             "failure": failure,
         }
+
+    def get_s1_season_summary_metrics(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        emission_types: list[str] | None = None,
+        season_id_field: str = "season_id",
+        game_id_field: str = "game_id",
+        player_id_field: str = "player_id",
+        reward_projection_field: str = "reward_projection",
+        reward_amount_field: str = "reward_amount",
+    ) -> dict[str, Any]:
+        """Compute deterministic Season 1 summary metrics for dashboard cards."""
+        payload_type_set = set(payload_types) if payload_types else None
+        season_emission_types = set(emission_types) if emission_types else None
+
+        game_ids: set[str] = set()
+        player_ids: set[str] = set()
+        reward_projection_total = 0.0
+        reward_emitted_total = 0.0
+        signal_count = 0
+        emission_count = 0
+
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, season_id_field, season_id):
+                continue
+            signal_count += 1
+            game_id = _payload_text(signal.payload, game_id_field)
+            if game_id is not None:
+                game_ids.add(game_id)
+            player_id = _payload_text(signal.payload, player_id_field)
+            if player_id is not None:
+                player_ids.add(player_id)
+            reward_projection_total += _payload_number(signal.payload, reward_projection_field)
+
+        for emission in self.iter_emissions(start=start, end=end, entity_ref=entity_ref, emission_types=emission_types):
+            if season_emission_types is not None and emission.emission_type not in season_emission_types:
+                continue
+            if not _payload_match(emission.payload, season_id_field, season_id):
+                continue
+            emission_count += 1
+            game_id = _payload_text(emission.payload, game_id_field)
+            if game_id is not None:
+                game_ids.add(game_id)
+            player_id = _payload_text(emission.payload, player_id_field)
+            if player_id is not None:
+                player_ids.add(player_id)
+            reward_emitted_total += _payload_number(emission.payload, reward_amount_field)
+
+        return {
+            "season_id": season_id,
+            "start": _ensure_utc(start).isoformat().replace("+00:00", "Z"),
+            "end": _ensure_utc(end).isoformat().replace("+00:00", "Z"),
+            "signal_count": signal_count,
+            "emission_count": emission_count,
+            "game_count": len(game_ids),
+            "player_count": len(player_ids),
+            "reward_projection_total": reward_projection_total,
+            "reward_emitted_total": reward_emitted_total,
+        }
+
+    def get_s1_per_game_aggregates(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        emission_types: list[str] | None = None,
+        season_id_field: str = "season_id",
+        game_id_field: str = "game_id",
+        player_id_field: str = "player_id",
+        reward_projection_field: str = "reward_projection",
+        reward_amount_field: str = "reward_amount",
+    ) -> list[dict[str, Any]]:
+        """Return deterministic Season 1 per-game aggregates."""
+        payload_type_set = set(payload_types) if payload_types else None
+        emission_type_set = set(emission_types) if emission_types else None
+        rows: dict[str, dict[str, Any]] = {}
+
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, season_id_field, season_id):
+                continue
+            game_id = _payload_text(signal.payload, game_id_field)
+            if game_id is None:
+                continue
+            row = rows.setdefault(
+                game_id,
+                {
+                    "season_id": season_id,
+                    "game_id": game_id,
+                    "signal_count": 0,
+                    "emission_count": 0,
+                    "player_count": 0,
+                    "reward_projection_total": 0.0,
+                    "reward_emitted_total": 0.0,
+                    "_players": set(),
+                },
+            )
+            row["signal_count"] += 1
+            player_id = _payload_text(signal.payload, player_id_field)
+            if player_id is not None:
+                row["_players"].add(player_id)
+            row["reward_projection_total"] += _payload_number(signal.payload, reward_projection_field)
+
+        for emission in self.iter_emissions(start=start, end=end, entity_ref=entity_ref, emission_types=emission_types):
+            if emission_type_set is not None and emission.emission_type not in emission_type_set:
+                continue
+            if not _payload_match(emission.payload, season_id_field, season_id):
+                continue
+            game_id = _payload_text(emission.payload, game_id_field)
+            if game_id is None:
+                continue
+            row = rows.setdefault(
+                game_id,
+                {
+                    "season_id": season_id,
+                    "game_id": game_id,
+                    "signal_count": 0,
+                    "emission_count": 0,
+                    "player_count": 0,
+                    "reward_projection_total": 0.0,
+                    "reward_emitted_total": 0.0,
+                    "_players": set(),
+                },
+            )
+            row["emission_count"] += 1
+            player_id = _payload_text(emission.payload, player_id_field)
+            if player_id is not None:
+                row["_players"].add(player_id)
+            row["reward_emitted_total"] += _payload_number(emission.payload, reward_amount_field)
+
+        result: list[dict[str, Any]] = []
+        for game_id in sorted(rows):
+            row = dict(rows[game_id])
+            players = row.pop("_players")
+            row["player_count"] = len(players)
+            result.append(row)
+        return result
+
+    def get_s1_per_player_dashboard_aggregates(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        season_id_field: str = "season_id",
+        player_id_field: str = "player_id",
+        game_id_field: str = "game_id",
+        metric_fields: list[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return deterministic Season 1 per-player dashboard aggregates."""
+        payload_type_set = set(payload_types) if payload_types else None
+        metrics = metric_fields or ["score", "points", "reward_projection", "reward_amount"]
+        rows: dict[str, dict[str, Any]] = {}
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, season_id_field, season_id):
+                continue
+            player_id = _payload_text(signal.payload, player_id_field)
+            if player_id is None:
+                continue
+            row = rows.setdefault(
+                player_id,
+                {
+                    "season_id": season_id,
+                    "player_id": player_id,
+                    "signal_count": 0,
+                    "games_played": 0,
+                    "_games": set(),
+                    "metrics": {field: 0.0 for field in metrics},
+                },
+            )
+            row["signal_count"] += 1
+            game_id = _payload_text(signal.payload, game_id_field)
+            if game_id is not None:
+                row["_games"].add(game_id)
+            for field in metrics:
+                row["metrics"][field] += _payload_number(signal.payload, field)
+
+        result: list[dict[str, Any]] = []
+        for player_id in sorted(rows):
+            row = dict(rows[player_id])
+            games = row.pop("_games")
+            row["games_played"] = len(games)
+            result.append(row)
+        return result
+
+    def get_s1_founder_stake_heartbeat(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        founder_id: str | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        season_id_field: str = "season_id",
+        founder_id_field: str = "founder_id",
+        stake_delta_field: str = "founder_stake_delta",
+        stake_value_field: str = "founder_stake_value",
+    ) -> list[dict[str, Any]]:
+        """Return heartbeat rows with running founder stake for Season 1."""
+        payload_type_set = set(payload_types) if payload_types else None
+        events: list[tuple[datetime, str, str, str, float, float | None]] = []
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, season_id_field, season_id):
+                continue
+            event_founder_id = _payload_text(signal.payload, founder_id_field)
+            if event_founder_id is None:
+                continue
+            if founder_id is not None and event_founder_id != founder_id:
+                continue
+            events.append(
+                (
+                    _ensure_utc(signal.timestamp),
+                    signal.signal_id,
+                    "signal",
+                    event_founder_id,
+                    _payload_number(signal.payload, stake_delta_field),
+                    (
+                        _payload_number(signal.payload, stake_value_field)
+                        if isinstance(signal.payload, dict) and stake_value_field in signal.payload
+                        else None
+                    ),
+                )
+            )
+
+        events.sort(key=lambda item: (item[0], item[1]))
+        running: dict[str, float] = {}
+        heartbeat_rows: list[dict[str, Any]] = []
+        for timestamp, signal_id, kind, event_founder_id, stake_delta, explicit_value in events:
+            current = running.get(event_founder_id, 0.0)
+            next_value = explicit_value if explicit_value is not None else current + stake_delta
+            running[event_founder_id] = next_value
+            heartbeat_rows.append(
+                {
+                    "season_id": season_id,
+                    "founder_id": event_founder_id,
+                    "timestamp": timestamp.isoformat().replace("+00:00", "Z"),
+                    "event_kind": kind,
+                    "event_id": signal_id,
+                    "stake_delta": stake_delta,
+                    "stake_value": next_value,
+                }
+            )
+        return heartbeat_rows
+
+    def get_s1_active_reward_projections(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        season_id_field: str = "season_id",
+        window_status_field: str = "window_status",
+        active_status: str = "ACTIVE",
+        projection_field: str = "reward_projection",
+        limit: int | None = None,
+    ) -> list[SignalEnvelope]:
+        """Return active-window reward projection rows in deterministic rank order."""
+        payload_type_set = set(payload_types) if payload_types else None
+        candidates: list[tuple[float, datetime, str, SignalEnvelope]] = []
+        for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if not _payload_match(signal.payload, season_id_field, season_id):
+                continue
+            if not _payload_match(signal.payload, window_status_field, active_status):
+                continue
+            projection = _payload_number(signal.payload, projection_field)
+            candidates.append((projection, _ensure_utc(signal.timestamp), signal.signal_id, signal))
+
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+        signals = [item[3] for item in candidates]
+        if limit is not None and limit >= 0:
+            return signals[:limit]
+        return signals
+
+    def get_s1_active_reward_projection_totals(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        group_by_field: str = "player_id",
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        projection_field: str = "reward_projection",
+    ) -> list[dict[str, Any]]:
+        """Return grouped totals for active-window reward projections."""
+        rows = self.get_s1_active_reward_projections(
+            start=start,
+            end=end,
+            season_id=season_id,
+            entity_ref=entity_ref,
+            sources=sources,
+            payload_types=payload_types,
+            projection_field=projection_field,
+        )
+        grouped: dict[str, dict[str, Any]] = {}
+        for signal in rows:
+            if not isinstance(signal.payload, dict):
+                continue
+            group_value = signal.payload.get(group_by_field)
+            if not isinstance(group_value, str) or not group_value:
+                continue
+            bucket = grouped.setdefault(
+                group_value,
+                {
+                    "season_id": season_id,
+                    "group": group_value,
+                    "signal_count": 0,
+                    "reward_projection_total": 0.0,
+                },
+            )
+            bucket["signal_count"] += 1
+            bucket["reward_projection_total"] += _payload_number(signal.payload, projection_field)
+
+        result = list(grouped.values())
+        result.sort(key=lambda item: (item["reward_projection_total"], item["group"]), reverse=True)
+        return result
+
+    def iter_s1_stage_window_signals(
+        self,
+        *,
+        stage: str,
+        start: datetime,
+        end: datetime,
+        checkpoint: ReplayCheckpoint | None = None,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        season_id: str | None = None,
+        season_id_field: str = "season_id",
+    ) -> Iterator[SignalEnvelope]:
+        """Replay checkpoint-aware Season 1 stage records."""
+        payload_type_set = set(payload_types) if payload_types else None
+        source_set = set(sources) if sources else None
+        source_prefixes = (f"s1.{stage}", f"season1.{stage}")
+
+        for signal in self.iter_signals_from_checkpoint(
+            start=start,
+            end=end,
+            checkpoint=checkpoint,
+            entity_ref=entity_ref,
+            sources=sources,
+        ):
+            if source_set is None and not any(
+                signal.source == prefix or signal.source.startswith(f"{prefix}.") for prefix in source_prefixes
+            ):
+                continue
+            if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                continue
+            if season_id is not None and not _payload_match(signal.payload, season_id_field, season_id):
+                continue
+            yield signal
+
+    def export_s1_postseason_research_dataset(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        season_id: str,
+        destination: str | Path,
+        entity_ref: EntityRef | None = None,
+        sources: list[str] | None = None,
+        payload_types: list[str] | None = None,
+        emission_types: list[str] | None = None,
+        season_id_field: str = "season_id",
+        include_signals: bool = True,
+        include_emissions: bool = True,
+    ) -> Path:
+        """
+        Export deterministic post-season research rows for Season 1.
+
+        Output is newline-delimited JSON and is overwrite-safe for reruns.
+        """
+        payload_type_set = set(payload_types) if payload_types else None
+        emission_type_set = set(emission_types) if emission_types else None
+        rows: list[tuple[datetime, str, dict[str, Any]]] = []
+
+        if include_signals:
+            for signal in self.iter_signals(start=start, end=end, entity_ref=entity_ref, sources=sources):
+                if payload_type_set is not None and signal.payload_type not in payload_type_set:
+                    continue
+                if not _payload_match(signal.payload, season_id_field, season_id):
+                    continue
+                ts = _ensure_utc(signal.timestamp)
+                rows.append(
+                    (
+                        ts,
+                        signal.signal_id,
+                        {
+                            "record_kind": "signal",
+                            "record_id": signal.signal_id,
+                            "timestamp": ts.isoformat().replace("+00:00", "Z"),
+                            "source": signal.source,
+                            "payload_type": signal.payload_type,
+                            "payload": signal.payload,
+                            "season_id": season_id,
+                            "entity_refs": [ref.to_dict() for ref in signal.entity_refs],
+                        },
+                    )
+                )
+
+        if include_emissions:
+            for emission in self.iter_emissions(start=start, end=end, entity_ref=entity_ref, emission_types=emission_types):
+                if emission_type_set is not None and emission.emission_type not in emission_type_set:
+                    continue
+                if not _payload_match(emission.payload, season_id_field, season_id):
+                    continue
+                ts = _ensure_utc(emission.timestamp)
+                rows.append(
+                    (
+                        ts,
+                        emission.emission_id,
+                        {
+                            "record_kind": "emission",
+                            "record_id": emission.emission_id,
+                            "timestamp": ts.isoformat().replace("+00:00", "Z"),
+                            "emission_type": emission.emission_type,
+                            "caused_by": emission.caused_by,
+                            "payload": emission.payload,
+                            "season_id": season_id,
+                            "entity_refs": [ref.to_dict() for ref in emission.entity_refs],
+                        },
+                    )
+                )
+
+        rows.sort(key=lambda item: (item[0], item[1], item[2]["record_kind"]))
+        output_path = Path(destination)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as handle:
+            for _, _, row in rows:
+                handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")))
+                handle.write("\n")
+        return output_path
 
     def _normalize_day(self, day: date | datetime | str) -> str:
         if isinstance(day, str):

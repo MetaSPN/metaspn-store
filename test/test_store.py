@@ -988,3 +988,254 @@ def test_token_promise_rerun_duplicate_safe_reads(tmp_path: Path) -> None:
         token_id="tok-r1",
     )
     assert [row.signal_id for row in rows] == ["s-tr1"]
+
+
+def test_s1_summary_game_player_and_founder_aggregates(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-s1-1",
+                _ts(5, 10, 0),
+                "s1.score.worker",
+                "S1GameStat",
+                {
+                    "season_id": "s1",
+                    "game_id": "g-1",
+                    "player_id": "p-1",
+                    "score": 12,
+                    "reward_projection": 3.0,
+                    "founder_id": "f-1",
+                    "founder_stake_delta": 0.5,
+                },
+            ),
+            SignalEnvelope(
+                "s-s1-2",
+                _ts(5, 10, 1),
+                "s1.score.worker",
+                "S1GameStat",
+                {
+                    "season_id": "s1",
+                    "game_id": "g-1",
+                    "player_id": "p-2",
+                    "score": 9,
+                    "reward_projection": 2.0,
+                    "founder_id": "f-1",
+                    "founder_stake_delta": -0.1,
+                },
+            ),
+            SignalEnvelope(
+                "s-s1-3",
+                _ts(5, 10, 2),
+                "s1.score.worker",
+                "S1GameStat",
+                {
+                    "season_id": "s1",
+                    "game_id": "g-2",
+                    "player_id": "p-1",
+                    "score": 14,
+                    "reward_projection": 5.0,
+                },
+            ),
+        ]
+    )
+    store.write_emissions(
+        [
+            EmissionEnvelope(
+                "e-s1-1",
+                _ts(5, 11, 0),
+                "S1RewardIssued",
+                {"season_id": "s1", "game_id": "g-1", "player_id": "p-1", "reward_amount": 1.5},
+                caused_by="s-s1-1",
+            ),
+            EmissionEnvelope(
+                "e-s1-2",
+                _ts(5, 11, 1),
+                "S1RewardIssued",
+                {"season_id": "s1", "game_id": "g-2", "player_id": "p-1", "reward_amount": 2.5},
+                caused_by="s-s1-3",
+            ),
+        ]
+    )
+
+    summary = store.get_s1_season_summary_metrics(start=_ts(5, 0, 0), end=_ts(5, 23, 59), season_id="s1")
+    per_game = store.get_s1_per_game_aggregates(start=_ts(5, 0, 0), end=_ts(5, 23, 59), season_id="s1")
+    per_player = store.get_s1_per_player_dashboard_aggregates(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        season_id="s1",
+        metric_fields=["score", "reward_projection"],
+    )
+    heartbeat = store.get_s1_founder_stake_heartbeat(start=_ts(5, 0, 0), end=_ts(5, 23, 59), season_id="s1")
+
+    assert summary["signal_count"] == 3
+    assert summary["emission_count"] == 2
+    assert summary["game_count"] == 2
+    assert summary["player_count"] == 2
+    assert summary["reward_projection_total"] == 10.0
+    assert summary["reward_emitted_total"] == 4.0
+    assert [row["game_id"] for row in per_game] == ["g-1", "g-2"]
+    assert per_game[0]["player_count"] == 2
+    assert [row["player_id"] for row in per_player] == ["p-1", "p-2"]
+    assert per_player[0]["metrics"]["score"] == 26.0
+    assert [row["event_id"] for row in heartbeat] == ["s-s1-1", "s-s1-2"]
+    assert [row["stake_value"] for row in heartbeat] == [0.5, 0.4]
+
+
+def test_s1_active_reward_projection_helpers(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-rw-1",
+                _ts(5, 12, 0),
+                "s1.rewards.worker",
+                "S1RewardProjection",
+                {"season_id": "s1", "player_id": "p-1", "window_status": "ACTIVE", "reward_projection": 4.0},
+            ),
+            SignalEnvelope(
+                "s-rw-2",
+                _ts(5, 12, 1),
+                "s1.rewards.worker",
+                "S1RewardProjection",
+                {"season_id": "s1", "player_id": "p-2", "window_status": "CLOSED", "reward_projection": 10.0},
+            ),
+            SignalEnvelope(
+                "s-rw-3",
+                _ts(5, 12, 2),
+                "s1.rewards.worker",
+                "S1RewardProjection",
+                {"season_id": "s1", "player_id": "p-1", "window_status": "ACTIVE", "reward_projection": 6.0},
+            ),
+        ]
+    )
+
+    active = store.get_s1_active_reward_projections(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        season_id="s1",
+        sources=["s1.rewards.worker"],
+        payload_types=["S1RewardProjection"],
+    )
+    totals = store.get_s1_active_reward_projection_totals(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        season_id="s1",
+        sources=["s1.rewards.worker"],
+        payload_types=["S1RewardProjection"],
+    )
+
+    assert [row.signal_id for row in active] == ["s-rw-3", "s-rw-1"]
+    assert totals == [{"season_id": "s1", "group": "p-1", "signal_count": 2, "reward_projection_total": 10.0}]
+
+
+def test_s1_stage_replay_checkpoint_is_deterministic(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-stg-1",
+                _ts(5, 13, 0),
+                "s1.route.worker",
+                "S1StageInput",
+                {"season_id": "s1"},
+            ),
+            SignalEnvelope(
+                "s-stg-2",
+                _ts(5, 13, 0),
+                "s1.route.worker",
+                "S1StageInput",
+                {"season_id": "s1"},
+            ),
+            SignalEnvelope(
+                "s-stg-3",
+                _ts(5, 13, 1),
+                "s1.route.worker",
+                "S1StageInput",
+                {"season_id": "s1"},
+            ),
+            SignalEnvelope(
+                "s-stg-4",
+                _ts(5, 13, 2),
+                "s1.route.worker",
+                "S1StageInput",
+                {"season_id": "s2"},
+            ),
+        ]
+    )
+
+    first = list(
+        store.iter_s1_stage_window_signals(
+            stage="route",
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            payload_types=["S1StageInput"],
+            season_id="s1",
+        )
+    )
+    checkpoint = store.build_signal_checkpoint(first[:2])
+    resumed = list(
+        store.iter_s1_stage_window_signals(
+            stage="route",
+            start=_ts(5, 0, 0),
+            end=_ts(5, 23, 59),
+            checkpoint=checkpoint,
+            payload_types=["S1StageInput"],
+            season_id="s1",
+        )
+    )
+
+    assert [row.signal_id for row in first] == ["s-stg-1", "s-stg-2", "s-stg-3"]
+    assert [row.signal_id for row in resumed] == ["s-stg-3"]
+
+
+def test_s1_postseason_export_is_deterministic_and_filtered(tmp_path: Path) -> None:
+    store = FileSystemStore(tmp_path)
+    store.write_signals(
+        [
+            SignalEnvelope(
+                "s-exp-1",
+                _ts(5, 14, 0),
+                "s1.export.worker",
+                "S1SeasonEvent",
+                {"season_id": "s1", "player_id": "p-1"},
+            ),
+            SignalEnvelope(
+                "s-exp-2",
+                _ts(5, 14, 1),
+                "s1.export.worker",
+                "S1SeasonEvent",
+                {"season_id": "s2", "player_id": "p-9"},
+            ),
+        ]
+    )
+    store.write_emissions(
+        [
+            EmissionEnvelope(
+                "e-exp-1",
+                _ts(5, 14, 2),
+                "S1SeasonOutcome",
+                {"season_id": "s1", "result": "ok"},
+                caused_by="s-exp-1",
+            ),
+        ]
+    )
+
+    export_path = tmp_path / "store" / "exports" / "s1-postseason.jsonl"
+    first_path = store.export_s1_postseason_research_dataset(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        season_id="s1",
+        destination=export_path,
+    )
+    second_path = store.export_s1_postseason_research_dataset(
+        start=_ts(5, 0, 0),
+        end=_ts(5, 23, 59),
+        season_id="s1",
+        destination=export_path,
+    )
+
+    rows = [json.loads(line) for line in first_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert first_path == second_path
+    assert [row["record_id"] for row in rows] == ["s-exp-1", "e-exp-1"]
+    assert all(row["season_id"] == "s1" for row in rows)
